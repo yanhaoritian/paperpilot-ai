@@ -1,0 +1,286 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>PaperPilot AI 文献总结助手</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+SC:wght@400;500;600;700;800&family=Space+Grotesk:wght@500;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <div class="page-shell">
+    <header class="hero">
+      <nav class="topbar">
+        <div class="brand">
+          <span class="brand-mark">P</span>
+          <div>
+            <p class="brand-title">PaperPilot</p>
+            <p class="brand-subtitle">AI 文献总结助手 Demo</p>
+          </div>
+        </div>
+        <div class="hero-tags">
+          <span>上传 PDF 自动抽取</span>
+          <span>单篇总结 + 多篇对比</span>
+          <span>支持导出 Markdown</span>
+        </div>
+      </nav>
+
+      <div class="hero-grid">
+        <section class="hero-copy">
+          <p class="eyebrow">PaperPilot 智能阅读工作台</p>
+          <h1>让论文阅读更快，让研究决策更清晰。</h1>
+          <p class="hero-text">
+            上传 PDF 后自动抽取文本，一键生成结构化总结，支持多篇论文横向对比，
+            帮你快速把阅读内容转成行动建议和可复用的研究报告。
+          </p>
+
+          <div class="cta-row">
+            <a class="primary-btn" href="#workspace">开始使用</a>
+            <a class="ghost-btn" href="#guide">查看使用指南</a>
+          </div>
+
+          <div class="metric-grid">
+            <article>
+              <strong>1 次上传</strong>
+              <span>自动提取正文并回填分析区</span>
+            </article>
+            <article>
+              <strong>5 个输出模块</strong>
+              <span>摘要、创新、风险、建议、提纲</span>
+            </article>
+            <article>
+              <strong>1 份报告</strong>
+              <span>可直接导出 Markdown 复用</span>
+            </article>
+          </div>
+        </section>
+
+        <aside class="hero-card">
+          <div class="card-top">
+            <span class="status-dot"></span>
+            <span>开始你的第一篇分析</span>
+          </div>
+          <h2>上传论文，生成清晰结论</h2>
+          <ul class="hero-card-list">
+            <li>支持 PDF 文本抽取与结构化总结</li>
+            <li>自动整理创新点、风险和阅读建议</li>
+            <li>多篇论文可横向对比并导出报告</li>
+          </ul>
+          <div class="confidence">
+            <div>
+              <p>推荐流程</p>
+              <strong>先上传 PDF</strong>
+            </div>
+            <div>
+              <p>输出形式</p>
+              <strong>总结 + 对比</strong>
+            </div>
+          </div>
+        </aside>
+      </div>
+    </header>
+
+    <main>
+      <section class="section" id="workspace">
+        <div class="section-heading">
+          <p class="section-kicker">Workspace</p>
+          <h2>文献分析工作台</h2>
+          <p>输入论文信息或直接上传 PDF，系统会生成结构化总结，并支持多篇论文对比分析。</p>
+        </div>
+
+        <div class="workspace-grid">
+          <section class="panel input-panel">
+            <div class="panel-header">
+              <h3>输入区</h3>
+              <span>支持论文标题 / 摘要 / 研究目标</span>
+            </div>
+
+            <label class="field">
+              <span>论文标题</span>
+              <input id="paperTitle" type="text" placeholder="例如：Attention Is All You Need">
+            </label>
+
+            <article class="upload-box">
+              <div class="panel-header">
+                <h3>PDF 上传与抽取</h3>
+                <span>从文献直接提取文本</span>
+              </div>
+              <label class="field">
+                <span>选择 PDF 文件</span>
+                <input id="pdfFile" type="file" accept="application/pdf">
+              </label>
+              <button class="ghost-btn full-width" id="extractBtn" type="button">从 PDF 抽取文本</button>
+              <p class="hint-line">提示：支持最高 100MB 的 PDF，提取后会自动回填到“摘要或核心内容”。</p>
+            </article>
+
+              <label class="field">
+                <span>论文摘要</span>
+                <textarea id="paperAbstract" rows="9" placeholder="可直接粘贴论文摘要，或先上传 PDF 自动定位并回填 Abstract 段。"></textarea>
+              </label>
+
+            <div class="persona-grid">
+              <button class="persona-btn active" data-persona="researcher">算法 / 研究</button>
+              <button class="persona-btn" data-persona="student">学生入门</button>
+            </div>
+
+            <label class="field">
+              <span>阅读目标</span>
+              <select id="goalSelect">
+                <option value="decision">快速判断这篇论文值不值得深入读</option>
+                <option value="meeting">生成组会 / 面试讲解提纲</option>
+                <option value="application">提炼论文的实际应用启发</option>
+              </select>
+            </label>
+
+            <article class="api-box">
+              <div class="panel-header">
+                <h3>后端代理配置</h3>
+                <span>前端不保存 API Key</span>
+              </div>
+
+              <label class="field">
+                <span>模型名称</span>
+                <input id="modelName" type="text" value="gpt-4.1-mini">
+              </label>
+
+              <label class="field">
+                <span>温度（0~1）</span>
+                <input id="temperature" type="number" min="0" max="1" step="0.1" value="0.3">
+              </label>
+
+              <label class="field">
+                <span>后端地址（公网部署请留空）</span>
+                <input id="backendUrl" type="text" value="" placeholder="留空=当前站点；本地开发可填 http://localhost:8787">
+              </label>
+
+              <label class="toggle">
+                <input id="fallbackToggle" type="checkbox" checked>
+                <span>调用失败时自动使用本地 Demo 结果兜底</span>
+              </label>
+            </article>
+
+            <div class="action-row">
+              <button class="primary-btn full-width" id="generateBtn">使用 AI 生成结果</button>
+              <button class="ghost-btn full-width" id="addCompareBtn">加入对比列表</button>
+            </div>
+
+            <div class="action-row">
+              <button class="ghost-btn full-width" id="exportBtn">导出 Markdown</button>
+              <button class="ghost-btn full-width" id="clearCompareBtn">清空对比列表</button>
+            </div>
+            <p class="status-line" id="statusLine">状态：待生成</p>
+          </section>
+
+          <section class="panel output-panel">
+            <div class="panel-header">
+              <h3>输出区</h3>
+              <span>结构化总结 + 对比洞察</span>
+            </div>
+
+            <div class="summary-head">
+              <p class="summary-label">当前视角</p>
+              <h3 id="resultTitle">算法 / 研究视角总结</h3>
+              <p id="resultSubtitle">聚焦方法创新、实验结论和是否值得进一步复现。</p>
+            </div>
+
+            <div class="result-grid">
+              <article class="result-card accent">
+                <p id="summaryCardLabel">一句话总结</p>
+                <h4 id="quickSummary">上传论文或输入摘要后，点击“使用 AI 生成结果”。</h4>
+              </article>
+              <article class="result-card">
+                <p id="innovationCardLabel">核心创新</p>
+                <ul id="innovationList">
+                  <li>生成后将在这里展示关键创新点。</li>
+                </ul>
+              </article>
+              <article class="result-card">
+                <p id="riskCardLabel">实验与风险</p>
+                <ul id="riskList">
+                  <li>生成后将在这里展示实验结论与风险提示。</li>
+                </ul>
+              </article>
+              <article class="result-card">
+                <p id="actionCardLabel">落地启发</p>
+                <ul id="actionList">
+                  <li>生成后将在这里展示阅读建议与应用方向。</li>
+                </ul>
+              </article>
+            </div>
+
+            <article class="report-card">
+              <div class="report-header">
+                <div>
+                  <p>附加能力</p>
+                  <h4 id="outlineCardTitle">汇报提纲生成</h4>
+                </div>
+                <span class="chip">适合组会 / 周会复盘</span>
+              </div>
+              <ol id="meetingOutline">
+                <li>生成后将在这里展示汇报提纲。</li>
+              </ol>
+            </article>
+
+            <article class="report-card compare-card">
+              <div class="report-header">
+                <div>
+                  <p>多篇论文能力</p>
+                  <h4>论文对比分析</h4>
+                </div>
+                <button class="primary-btn compact-btn" id="compareBtn" type="button">生成对比</button>
+              </div>
+              <p class="summary-label">已加入对比列表</p>
+              <ul id="compareList"></ul>
+              <div class="compare-grid">
+                <article>
+                  <h5>共同主题</h5>
+                  <p id="compareTheme">等待生成</p>
+                </article>
+                <article>
+                  <h5>核心差异</h5>
+                  <ul id="compareDiff"></ul>
+                </article>
+                <article>
+                  <h5>应用机会</h5>
+                  <ul id="compareOpportunity"></ul>
+                </article>
+                <article>
+                  <h5>下一步建议</h5>
+                  <ul id="compareRecommendation"></ul>
+                </article>
+              </div>
+            </article>
+          </section>
+        </div>
+      </section>
+
+      <section class="section" id="guide">
+        <div class="section-heading">
+          <p class="section-kicker">Guide</p>
+          <h2>如何高效使用</h2>
+          <p>建议按下面流程操作，确保抽取、总结和对比都能得到稳定结果。</p>
+        </div>
+
+        <div class="story-grid">
+          <article class="story-card">
+            <h3>1. 先抽取，再总结</h3>
+            <p>优先上传 PDF 抽取正文，避免只靠标题总结，结果会更准确。</p>
+          </article>
+          <article class="story-card">
+            <h3>2. 角色与目标要匹配</h3>
+            <p>根据你当前任务选择研究或入门视角，让输出更贴近实际用途。</p>
+          </article>
+          <article class="story-card">
+            <h3>3. 用对比功能做决策</h3>
+            <p>把候选论文加入对比列表，生成差异、机会和下一步实验建议。</p>
+          </article>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <script src="script.js"></script>
+</body>
+</html>

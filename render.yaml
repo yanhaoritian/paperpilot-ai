@@ -1,0 +1,22 @@
+# Render Blueprint：https://render.com/docs/infrastructure-as-code
+# 在 Dashboard：New → Blueprint → 连接本仓库，按提示填写 OPENAI_API_KEY
+
+services:
+  - type: web
+    name: paperpilot
+    runtime: node
+    plan: free
+    buildCommand: npm ci
+    startCommand: npm start
+    healthCheckPath: /api/health
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: TRUST_PROXY
+        value: "1"
+      - key: OPENAI_BASE_URL
+        value: https://api.openai.com/v1
+      - key: DEFAULT_MODEL
+        value: gpt-4.1-mini
+      - key: OPENAI_API_KEY
+        sync: false
