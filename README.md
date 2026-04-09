@@ -16,6 +16,7 @@
 - `server.js` 后端代理与 PDF 抽取服务
 - `.env.example` 环境变量模板
 - `render.yaml` [Render](https://render.com) Blueprint（可选一键部署）
+- `tunnel-quick.ps1` 本机 + Cloudflare Quick Tunnel 辅助脚本
 
 ## 1. 启动前准备
 
@@ -99,6 +100,32 @@ npm start
 5. 页面上 **「后端地址」保持留空**（已默认同源）。
 
 说明：免费实例在无流量一段时间后会 **休眠**，首次访问可能多等几秒；`PORT` 由 Render 自动注入，无需在面板里再加。若改用第三方 API 基址，可在 Environment 里改 `OPENAI_BASE_URL` / `DEFAULT_MODEL`。
+
+### 本机 + Cloudflare Tunnel（免买服务器，一般不需绑国外支付卡）
+
+适合临时把网站以 **HTTPS** 暴露给外人试用：**电脑要一直开着**，且本机需能访问 OpenAI（或你配置的 `OPENAI_BASE_URL`）。
+
+1. **安装 cloudflared（只需一次）**  
+   ```text
+   winget install Cloudflare.cloudflared
+   ```  
+   装完后**新开**一个 PowerShell（否则找不到命令）。
+
+2. **配置并启动应用**（终端 A）  
+   - 复制 `.env.example` 为 `.env`，填入 `OPENAI_API_KEY` 等。  
+   - `npm start`  
+   - 默认本地地址为 `http://localhost:8787`（若改了 `PORT`，请与下面脚本一致或设环境变量 `PORT`）。
+
+3. **启动隧道**（终端 B，项目根目录）  
+   ```text
+   powershell -NoProfile -ExecutionPolicy Bypass -File .\tunnel-quick.ps1
+   ```  
+   终端里会出现一行 **`https://……trycloudflare.com`**，把该链接发给别人即可。
+
+4. **页面设置**  
+   - 「后端地址」**留空**（与隧道域名同源）。  
+
+说明：Quick Tunnel 的域名**每次启动隧道可能变化**；仅适合演示。若要固定域名，需在 Cloudflare 控制台配置「命名隧道」并托管域名，参见 [Cloudflare Tunnel 文档 https://developers.cloudflare.com/cloudflare-one/connections/connect-apps/](https://developers.cloudflare.com/cloudflare-one/connections/connect-apps/)。
 
 ## 5. 使用流程
 
