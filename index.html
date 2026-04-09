@@ -17,7 +17,7 @@
           <span class="brand-mark">P</span>
           <div>
             <p class="brand-title">PaperPilot</p>
-            <p class="brand-subtitle">AI 文献总结助手 Demo</p>
+            <p class="brand-subtitle">文献阅读与对比工具</p>
           </div>
         </div>
         <div class="hero-tags">
@@ -32,28 +32,13 @@
           <p class="eyebrow">PaperPilot 智能阅读工作台</p>
           <h1>让论文阅读更快，让研究决策更清晰。</h1>
           <p class="hero-text">
-            上传 PDF 后自动抽取文本，一键生成结构化总结，支持多篇论文横向对比，
-            帮你快速把阅读内容转成行动建议和可复用的研究报告。
+            上传 PDF 自动抽取摘要，一键生成结构化总结，支持多篇论文横向对比，
+            把阅读收获整理成可执行的建议与可导出的报告。
           </p>
 
           <div class="cta-row">
             <a class="primary-btn" href="#workspace">开始使用</a>
             <a class="ghost-btn" href="#guide">查看使用指南</a>
-          </div>
-
-          <div class="metric-grid">
-            <article>
-              <strong>1 次上传</strong>
-              <span>自动提取正文并回填分析区</span>
-            </article>
-            <article>
-              <strong>5 个输出模块</strong>
-              <span>摘要、创新、风险、建议、提纲</span>
-            </article>
-            <article>
-              <strong>1 份报告</strong>
-              <span>可直接导出 Markdown 复用</span>
-            </article>
           </div>
         </section>
 
@@ -79,6 +64,21 @@
             </div>
           </div>
         </aside>
+
+        <div class="metric-grid hero-metrics" aria-label="功能摘要">
+          <article>
+            <strong>1 次上传</strong>
+            <span>自动提取正文并回填分析区</span>
+          </article>
+          <article>
+            <strong>5 个输出模块</strong>
+            <span>摘要、创新、风险、建议、提纲</span>
+          </article>
+          <article>
+            <strong>1 份报告</strong>
+            <span>可直接导出 Markdown 复用</span>
+          </article>
+        </div>
       </div>
     </header>
 
@@ -112,7 +112,7 @@
                 <input id="pdfFile" type="file" accept="application/pdf">
               </label>
               <button class="ghost-btn full-width" id="extractBtn" type="button">从 PDF 抽取文本</button>
-              <p class="hint-line">提示：支持最高 100MB 的 PDF，提取后会自动回填到“摘要或核心内容”。</p>
+              <p class="hint-line" id="pdfSizeHint">提示：单个 PDF 请控制在 32 MB 以内。提取成功后会自动填入下方「摘要」。</p>
             </article>
 
               <label class="field">
@@ -136,28 +136,28 @@
 
             <article class="api-box">
               <div class="panel-header">
-                <h3>后端代理配置</h3>
-                <span>前端不保存 API Key</span>
+                <h3>生成选项</h3>
+                <span>一般保持默认即可</span>
               </div>
 
               <label class="field">
-                <span>模型名称</span>
+                <span>生成模型</span>
                 <input id="modelName" type="text" value="gpt-4.1-mini">
               </label>
 
               <label class="field">
-                <span>温度（0~1）</span>
+                <span>创意程度（0～1）</span>
                 <input id="temperature" type="number" min="0" max="1" step="0.1" value="0.3">
               </label>
 
               <label class="field">
-                <span>后端地址（公网部署请留空）</span>
-                <input id="backendUrl" type="text" value="" placeholder="留空=当前站点；本地开发可填 http://localhost:8787">
+                <span>网页地址</span>
+                <input id="backendUrl" type="text" value="" placeholder="一般留空；仅在特殊连接方式下填写">
               </label>
 
               <label class="toggle">
                 <input id="fallbackToggle" type="checkbox" checked>
-                <span>调用失败时自动使用本地 Demo 结果兜底</span>
+                <span>生成失败时显示示例排版（内容仅供参考）</span>
               </label>
             </article>
 
@@ -170,7 +170,7 @@
               <button class="ghost-btn full-width" id="exportBtn">导出 Markdown</button>
               <button class="ghost-btn full-width" id="clearCompareBtn">清空对比列表</button>
             </div>
-            <p class="status-line" id="statusLine">状态：待生成</p>
+            <p class="status-line" id="statusLine">提示：填写论文信息或上传 PDF 后即可开始。</p>
           </section>
 
           <section class="panel output-panel">
@@ -269,8 +269,8 @@
             <p>优先上传 PDF 抽取正文，避免只靠标题总结，结果会更准确。</p>
           </article>
           <article class="story-card">
-            <h3>2. 角色与目标要匹配</h3>
-            <p>根据你当前任务选择研究或入门视角，让输出更贴近实际用途。</p>
+            <h3>2. 角色与阅读目标一起选</h3>
+            <p>「是否深读」「讲解」「落地」三种目标会改变提纲结构与侧重点；与学生入门 / 研究视角搭配使用效果更好。</p>
           </article>
           <article class="story-card">
             <h3>3. 用对比功能做决策</h3>

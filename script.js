@@ -112,8 +112,46 @@ function toArray(value, fallback) {
 }
 
 function updateStatus(text, isError = false) {
-  statusLine.textContent = `状态：${text}`;
+  statusLine.textContent = `提示：${text}`;
   statusLine.classList.toggle("error", isError);
+}
+
+let cachedMaxPdfMb = 32;
+
+async function syncLimitsFromServer() {
+  const hintEl = document.getElementById("pdfSizeHint");
+  try {
+    const response = await fetch(apiUrl("/api/health"));
+    if (!response.ok) {
+      return;
+    }
+    const data = await response.json();
+    const mb = data.maxPdfMb;
+    if (Number.isFinite(mb) && mb > 0) {
+      cachedMaxPdfMb = mb;
+      if (hintEl) {
+        hintEl.textContent = `提示：单个 PDF 请控制在 ${mb} MB 以内。提取成功后会自动填入下方「摘要」。`;
+      }
+    }
+  } catch {
+    /* 使用页面默认文案 */
+  }
+}
+
+async function readErrorMessage(response) {
+  const raw = await response.text();
+  let msg = "请稍后再试。";
+  try {
+    const data = JSON.parse(raw);
+    if (data && typeof data.error === "string" && data.error.trim()) {
+      msg = data.error.trim();
+    }
+  } catch {
+    if (raw && raw.length < 400) {
+      msg = raw.trim().slice(0, 400);
+    }
+  }
+  return msg;
 }
 
 function getPaperStateKey() {
@@ -173,7 +211,7 @@ function getBackendUrl() {
   return (backendUrlInput.value || "").trim().replace(/\/$/, "");
 }
 
-/** 公网同源部署时留空后端地址，请求发到当前站点 */
+/** 服务地址留空时，请求发到当前网页所在站点 */
 function apiUrl(path) {
   const base = getBackendUrl();
   const p = path.startsWith("/") ? path : `/${path}`;
@@ -185,25 +223,85 @@ function buildFallbackResult() {
   const title = titleInput.value.trim() || "这篇论文";
   const abstract = abstractInput.value.trim();
   const goal = goalSelect.value;
-  let prefix = "如果目标是快速判断价值，这篇论文最核心的结论是：";
+  let prefix = "【是否值得深读】结论倾向：";
   if (goal === "meeting") {
-    prefix = "如果目标是用于组会或面试表达，这篇论文最值得你强调的是：";
+    prefix = "【组会/面试】30 秒开场：";
   } else if (goal === "application") {
-    prefix = "如果目标是寻找实际应用方向，这篇论文最重要的启发是：";
+    prefix = "【落地启发】场景与价值：";
   }
 
   const abstractHint = abstract.length > 180
-    ? "摘要显示这是一篇偏基础架构创新的工作，适合优先理解其方法变化与影响范围。"
-    : "当前输入较短，系统会优先根据标题和阅读目标生成高层总结。";
+    ? "摘要信息较完整，以下结构与当前阅读目标对齐。"
+    : "摘要较短，以下为按阅读目标整理的占位结构；连接 AI 后可生成更贴合原文的条目。";
+
+  let outline;
+  let actions;
+  let risks;
+  let readOrder;
+  if (goal === "meeting") {
+    outline = [
+      "开场：问题背景与这篇工作的「一句话故事」",
+      "核心方法：用生活化类比讲清关键设计（控制在一分钟）",
+      "实验：哪条结果最能说服听众，以及一句局限",
+      "收尾：可复述的结论 + 预设 1～2 个听众追问"
+    ];
+    actions = [
+      "计时演练全文讲解，控制在目标时长内。",
+      "准备一张方法示意图，能脱离论文讲清楚。",
+      "列出三个最可能被问的问题并写出口头提纲。"
+    ];
+    risks = [
+      "术语过多会让非小院线听众掉队，准备降级说法。",
+      "实验设定与听众直觉场景不符时，需主动交代前提。",
+      "若被问「和某某经典工作关系」，用对比一句接住。"
+    ];
+    readOrder = "先定讲解故事线，再精读方法图与主实验表";
+  } else if (goal === "application") {
+    outline = [
+      "目标场景：谁在用、解决什么痛点",
+      "方案要点：核心能力与可复用的技术组件",
+      "实施条件：数据、算力、集成方式与迭代周期",
+      "风险与指标：上线后如何衡量成功、已知坑位"
+    ];
+    actions = [
+      "列出两个最小可行验证场景并定义成功指标。",
+      "对照现有方案估算增量成本与依赖（数据/人力）。",
+      "标注一条「论文有、现实可能没有」的前提。"
+    ];
+    risks = [
+      "论文 benchmark 与真实负载/数据分布可能不一致。",
+      "合规、安全或运维成本在文中往往一笔带过。",
+      "效果提升是否覆盖集成与维护成本需单独算账。"
+    ];
+    readOrder = "先抓摘要中的任务定义，再对照实验中的设定是否贴近你的场景";
+  } else {
+    outline = [
+      "结论快照：建议深读 / 泛读 / 跳过的倾向与理由",
+      "关键证据：支撑上述判断的一条方法线与一条实验结果",
+      "主要疑点：继续读前必须澄清的薄弱点",
+      "是否继续：若读从哪一节切入，不读可转向哪些关键词或综述"
+    ];
+    actions = [
+      "用 10 分钟扫方法与主实验，验证摘要是否夸大。",
+      "若决定不读：保存标题与关键词供日后主题检索。",
+      "若决定深读：列出要在笔记里回答的三个问题。"
+    ];
+    risks = [
+      "时间与选题机会成本：深读后价值不及预期。",
+      "领域前提不熟导致误判贡献或创新边界。",
+      "追热点论文但实验不可复现或数据未公开。"
+    ];
+    readOrder = "摘要→结论→主实验；可疑再读方法细节";
+  }
 
   return {
     quickSummary: `${prefix}${persona.summary(title)} ${abstractHint}`,
     innovations: persona.innovations,
-    risks: persona.risks,
-    actions: persona.actions,
-    outline: persona.outline,
+    risks,
+    actions,
+    outline,
     confidence: "90%",
-    readOrder: "先看摘要与结论，再看方法与实验"
+    readOrder
   };
 }
 
@@ -313,28 +411,28 @@ async function postJson(path, payload) {
     body: JSON.stringify(payload)
   });
   if (!response.ok) {
-    const errorText = await response.text();
-    throw new Error(`${path} 调用失败 (${response.status})：${errorText.slice(0, 220)}`);
+    const msg = await readErrorMessage(response);
+    throw new Error(msg);
   }
   return response.json();
 }
 
 async function renderResult() {
   setLoading(generateBtn, "生成中，请稍候...", true);
-  updateStatus("正在调用后端生成总结...");
+  updateStatus("正在生成总结，请稍候…");
   try {
     const payload = getSummaryPayload();
     const data = await postJson("/api/summarize", payload);
     latestResult = sanitizeSummary(data.result);
     saveCurrentResultToCache();
     applyResult(latestResult);
-    updateStatus("已完成 AI 生成");
+    updateStatus("总结已生成。");
   } catch (error) {
     if (fallbackToggle.checked) {
       latestResult = buildFallbackResult();
       saveCurrentResultToCache();
       applyResult(latestResult);
-      updateStatus(`AI 调用失败，已切换本地结果：${error.message}`, true);
+      updateStatus(`本次未成功连接生成服务，已显示示例内容。原因：${error.message}`, true);
     } else {
       updateStatus(error.message, true);
     }
@@ -349,8 +447,13 @@ async function extractFromPdf() {
     updateStatus("请先选择 PDF 文件。", true);
     return;
   }
+  const maxBytes = cachedMaxPdfMb * 1024 * 1024;
+  if (file.size > maxBytes) {
+    updateStatus(`文件超过当前上限（${cachedMaxPdfMb} MB），请选用更小的 PDF 或压缩后再试。`, true);
+    return;
+  }
   setLoading(extractBtn, "抽取中...", true);
-  updateStatus("正在提取 PDF 文本...");
+  updateStatus("正在从 PDF 中提取摘要…");
   try {
     const formData = new FormData();
     formData.append("pdf", file);
@@ -359,8 +462,8 @@ async function extractFromPdf() {
       body: formData
     });
     if (!response.ok) {
-      const errorText = await response.text();
-      throw new Error(`PDF 抽取失败 (${response.status})：${errorText.slice(0, 220)}`);
+      const msg = await readErrorMessage(response);
+      throw new Error(msg);
     }
     const data = await response.json();
     if (!data.abstract || !data.abstract.trim()) {
@@ -371,7 +474,7 @@ async function extractFromPdf() {
     if (data.fileName && data.fileName.trim()) {
       titleInput.value = data.fileName.replace(/\.pdf$/i, "");
     }
-    updateStatus(`已完成文本抽取（约 ${data.characters || 0} 字符）`);
+    updateStatus("摘要已从 PDF 填入，可检查下方文本后点击生成总结。");
   } catch (error) {
     updateStatus(error.message, true);
   } finally {
@@ -411,24 +514,26 @@ async function generateCompare() {
     return;
   }
   setLoading(compareBtn, "对比中...", true);
-  updateStatus("正在生成多篇论文对比...");
+    updateStatus("正在生成多篇对比，请稍候…");
   try {
     const payload = {
       papers: compareItems,
       personaKey: currentPersona,
       personaLabel: getActivePersonaLabel(),
+      goal: goalSelect.value,
+      goalLabel: goalSelect.options[goalSelect.selectedIndex]?.text || "快速判断",
       model: (modelInput.value || "").trim(),
       temperature: Number.parseFloat(temperatureInput.value || "0.3")
     };
     const data = await postJson("/api/compare", payload);
     latestComparison = sanitizeComparison(data.result);
     applyComparison(latestComparison);
-    updateStatus("已完成论文对比分析。");
+    updateStatus("对比结果已生成。");
   } catch (error) {
     if (fallbackToggle.checked) {
       latestComparison = buildFallbackComparison();
       applyComparison(latestComparison);
-      updateStatus(`对比失败，已使用本地结果：${error.message}`, true);
+      updateStatus(`本次未成功连接生成服务，已显示示例对比。原因：${error.message}`, true);
     } else {
       updateStatus(error.message, true);
     }
@@ -529,3 +634,5 @@ exportBtn.addEventListener("click", exportMarkdown);
 resetOutputToEmptyState();
 applyComparison(buildFallbackComparison());
 renderCompareList();
+
+syncLimitsFromServer();

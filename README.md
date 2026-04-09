@@ -1,11 +1,14 @@
-# PaperPilot AI 文献总结助手
+# PaperPilot 文献阅读助手
 
-这是一个面向 AI 产品经理岗位的作品型项目，当前版本已从静态 Demo 升级为完整工作流：
+面向日常读论文、做对比、写总结的场景：上传 PDF 抽取摘要，用 AI 生成结构化要点，支持多篇横向对比，并可导出 Markdown。
 
-- PDF 上传与文本抽取
-- 后端代理调用模型（前端不暴露 Key）
-- 单篇论文结构化总结
-- 多篇论文对比分析
+**主要能力**
+
+- PDF 上传与文本抽取（需带可选中文字层的 PDF）
+- 后端调用大模型（API Key 仅在后端使用，不进入浏览器）
+- 单篇：一句话总结、创新点、风险、行动建议、提纲等
+- 多篇：主题、差异、机会与建议
+- 阅读目标（是否深读 / 讲解 / 落地）与读者角色会影响输出结构
 - 导出 Markdown 报告
 
 ## 目录结构
@@ -13,16 +16,14 @@
 - `index.html` 前端页面
 - `styles.css` 样式
 - `script.js` 前端交互逻辑
-- `server.js` 后端代理与 PDF 抽取服务
+- `server.js` 后端代理与 PDF 抽取
 - `.env.example` 环境变量模板
-- `render.yaml` [Render](https://render.com) Blueprint（可选一键部署）
-- `tunnel-quick.ps1` 本机 + Cloudflare Quick Tunnel 辅助脚本
+- `tunnel-quick.ps1` 本机 + Cloudflare Quick Tunnel（可选）
+- `Dockerfile` 容器运行（可选）
 
-## 1. 启动前准备
+## 1. 环境要求
 
-你需要安装 Node.js 18+。
-
-检查：
+需要 **Node.js 18+**。
 
 ```bash
 node -v
@@ -38,7 +39,7 @@ npm install
 ## 3. 配置环境变量
 
 1. 复制 `.env.example` 为 `.env`
-2. 在 `.env` 填入你的真实配置
+2. 在 `.env` 中填入真实配置
 
 示例：
 
@@ -51,135 +52,63 @@ DEFAULT_MODEL=gpt-4.1-mini
 
 说明：
 
-- `OPENAI_API_KEY` 只在后端使用，不会暴露到浏览器。
-- 如果你使用兼容 OpenAI 协议的平台，可替换 `OPENAI_BASE_URL`。
+- `OPENAI_API_KEY` 仅在服务器进程内使用，不要提交到 Git。
+- 使用兼容 OpenAI Chat Completions 的服务时，可修改 `OPENAI_BASE_URL`。
 
-## 4. 启动项目
+## 4. 本地启动
 
 ```bash
 npm start
 ```
 
-启动后打开：
+浏览器访问：`http://localhost:8787`  
+健康检查：`http://localhost:8787/api/health`
 
-- `http://localhost:8787`
+## 公网访问（简要）
 
-健康检查：
+若把程序部署在自己的 **VPS / 内网服务器**，请将 `.env` 中密钥只留在服务器上，勿提交到 Git；置于 Nginx 等反向代理之后时建议设置 `NODE_ENV=production`、`TRUST_PROXY=1`。前端「后端地址」与网站同源时请**留空**。
 
-- `http://localhost:8787/api/health`
+### 本机 + Cloudflare Tunnel（当前常用）
 
-## 公网部署（简要）
+适合临时把 HTTPS 地址发给别人试用：本机需能访问配置的模型 API，电脑需保持在线。
 
-1. **环境变量**（在云平台「Environment」里配置，勿提交 `.env` 到仓库）  
-   - 必填：`OPENAI_API_KEY`  
-   - 建议：`NODE_ENV=production`、`TRUST_PROXY=1`（前面有反向代理或负载均衡时必开，否则限流 IP 不准）  
-   - `PORT` 多数平台会自动注入，无需手写。
+1. 安装：`winget install Cloudflare.cloudflared`（装完新开终端）
+2. 终端 A：配置 `.env` 后执行 `npm start`
+3. 终端 B：在项目根目录执行  
+   `powershell -NoProfile -ExecutionPolicy Bypass -File .\tunnel-quick.ps1`  
+4. 使用终端输出的 `https://……trycloudflare.com`；页面上「后端地址」留空。
 
-2. **启动命令**  
-   - 直接 Node：`npm start`（入口为 `server.js`，默认监听 `0.0.0.0` + `PORT`）。
-
-3. **Docker**（可选）  
-   - 仓库根目录已提供 `Dockerfile`，构建后运行镜像即可；仍需在同一环境注入上述变量。
-
-4. **前端「后端地址」**  
-   - 页面里该项**留空**时，浏览器会请求**当前域名**（与 API 同源），适合公网；本地调试可填 `http://localhost:8787`。
-
-5. **HTTPS**  
-   - 正式对外请使用平台提供的 TLS，或在前面加 Caddy / Nginx 终止 HTTPS。
-
-其他方式：VPS + PM2、Railway、Fly.io 等，思路相同（环境变量 + `npm start` 或 Docker）。
-
-### 使用 Render（推荐你当前方案）
-
-仓库根目录已有 **`render.yaml`**（Blueprint）：会为 Node Web Service 设置 `npm ci` / `npm start`、健康检查 `/api/health`、`NODE_ENV=production`、`TRUST_PROXY=1`，并在首次部署时提示你填写 **`OPENAI_API_KEY`**（不会写进仓库）。
-
-1. 把本仓库推送到 **GitHub** 或 **GitLab**（需包含 **`package-lock.json`**，否则把 `render.yaml` 里的 `buildCommand` 改成 `npm install`）。
-2. 打开 [Render Dashboard](https://dashboard.render.com/)，登录后点 **New → Blueprint**。
-3. 连接你的仓库，选中包含 `render.yaml` 的分支，点应用；在向导里填入 **`OPENAI_API_KEY`**。
-4. 等待首次构建与部署完成，打开 Render 给的 **`https://xxxxx.onrender.com`** 即访问本站。
-5. 页面上 **「后端地址」保持留空**（已默认同源）。
-
-说明：免费实例在无流量一段时间后会 **休眠**，首次访问可能多等几秒；`PORT` 由 Render 自动注入，无需在面板里再加。若改用第三方 API 基址，可在 Environment 里改 `OPENAI_BASE_URL` / `DEFAULT_MODEL`。
-
-### 本机 + Cloudflare Tunnel（免买服务器，一般不需绑国外支付卡）
-
-适合临时把网站以 **HTTPS** 暴露给外人试用：**电脑要一直开着**，且本机需能访问 OpenAI（或你配置的 `OPENAI_BASE_URL`）。
-
-1. **安装 cloudflared（只需一次）**  
-   ```text
-   winget install Cloudflare.cloudflared
-   ```  
-   装完后**新开**一个 PowerShell（否则找不到命令）。
-
-2. **配置并启动应用**（终端 A）  
-   - 复制 `.env.example` 为 `.env`，填入 `OPENAI_API_KEY` 等。  
-   - `npm start`  
-   - 默认本地地址为 `http://localhost:8787`（若改了 `PORT`，请与下面脚本一致或设环境变量 `PORT`）。
-
-3. **启动隧道**（终端 B，项目根目录）  
-   ```text
-   powershell -NoProfile -ExecutionPolicy Bypass -File .\tunnel-quick.ps1
-   ```  
-   终端里会出现一行 **`https://……trycloudflare.com`**，把该链接发给别人即可。
-
-4. **页面设置**  
-   - 「后端地址」**留空**（与隧道域名同源）。  
-
-说明：Quick Tunnel 的域名**每次启动隧道可能变化**；仅适合演示。若要固定域名，需在 Cloudflare 控制台配置「命名隧道」并托管域名，参见 [Cloudflare Tunnel 文档 https://developers.cloudflare.com/cloudflare-one/connections/connect-apps/](https://developers.cloudflare.com/cloudflare-one/connections/connect-apps/)。
+Quick Tunnel 域名可能每次变化；固定域名需按 [Cloudflare Tunnel 文档](https://developers.cloudflare.com/cloudflare-one/connections/connect-apps/) 配置命名隧道。
 
 ## 5. 使用流程
 
-1. 在页面输入论文标题，或直接上传 PDF
-2. 点击“从 PDF 抽取文本”，自动回填摘要区
-3. 选择角色视角与阅读目标
-4. 点击“使用 AI 生成结果”
-5. 如需多篇对比，点击“加入对比列表”，加入至少 2 篇后点击“生成对比”
-6. 点击“导出 Markdown”生成可复用报告
+1. 输入标题与摘要，或上传 PDF 并点击抽取
+2. 选择读者视角与**阅读目标**
+3. 点击「使用 AI 生成结果」
+4. 多篇对比：加入列表后点「生成对比」
+5. 需要可「导出 Markdown」
 
 ## 后端 API
 
-- `POST /api/extract-pdf`  
-  `multipart/form-data`，字段名 `pdf`，返回抽取文本与统计信息
-
-- `POST /api/summarize`  
-  请求体示例：
+- `POST /api/extract-pdf`：`multipart/form-data`，字段名 `pdf`
+- `POST /api/summarize`：JSON，示例：
   ```json
   {
     "paperTitle": "Attention Is All You Need",
-    "paperAbstract": "....",
-    "personaKey": "pm",
-    "personaLabel": "AI 产品经理",
+    "paperAbstract": "...",
+    "personaKey": "researcher",
+    "personaLabel": "算法 / 研究",
     "goal": "decision",
     "goalLabel": "快速判断这篇论文值不值得深入读",
     "model": "gpt-4.1-mini",
     "temperature": 0.3
   }
   ```
+- `POST /api/compare`：JSON，`papers` 至少两篇，可带 `goal` / `goalLabel` 与单篇一致
 
-- `POST /api/compare`  
-  请求体示例：
-  ```json
-  {
-    "papers": [
-      { "title": "Paper A", "abstract": "..." },
-      { "title": "Paper B", "abstract": "..." }
-    ],
-    "personaKey": "pm",
-    "personaLabel": "AI 产品经理",
-    "model": "gpt-4.1-mini",
-    "temperature": 0.3
-  }
-  ```
+## 后续可扩展方向
 
-## 已实现的岗位信号
-
-- AI 理解：能从论文抽取到结构化分析
-- 产品思维：支持 persona、目标导向输出、对比决策
-- 动手能力：有可运行 Demo + 后端代理 + 可导出结果
-
-## 下一步可迭代
-
-1. 增加论文来源接入（arXiv URL 直接解析）
-2. 增加历史记录与研究知识库
-3. 增加对比结果评分与实验追踪
-4. 增加登录和团队协作能力
+1. 论文来源（如 arXiv 链接）一键拉取
+2. 本地历史记录或小知识库
+3. 对比结果的评分与实验笔记
+4. 账号与协作（若有多用户需求）
