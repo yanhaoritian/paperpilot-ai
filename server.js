@@ -96,6 +96,122 @@ const documentHashIndex = new Map();
 const libraryChatHistory = [];
 const FEEDBACK_DIR = path.resolve(__dirname, "data");
 const FEEDBACK_FILE = path.join(FEEDBACK_DIR, "feedback.jsonl");
+const LIBRARY_STORE_FILE = path.join(FEEDBACK_DIR, "library-store.json");
+let persistTimer = null;
+let persistInFlight = false;
+
+function normalizeLoadedDoc(raw) {
+  if (!raw || typeof raw !== "object") {
+    return null;
+  }
+  const id = String(raw.id || "").trim();
+  const fileHash = String(raw.fileHash || "").trim();
+  if (!id || !fileHash) {
+    return null;
+  }
+  const chunks = Array.isArray(raw.chunks) ? raw.chunks : [];
+  const embeddings = Array.isArray(raw.embeddings) ? raw.embeddings : null;
+  return {
+    id,
+    fileHash,
+    fileName: String(raw.fileName || "uploaded-paper.pdf").trim() || "uploaded-paper.pdf",
+    pages: Number.isFinite(Number(raw.pages)) ? Number(raw.pages) : 0,
+    fullText: String(raw.fullText || ""),
+    abstract: String(raw.abstract || ""),
+    chunks,
+    embeddings,
+    status: String(raw.status || "ready_no_embed"),
+    statusDetail: raw.statusDetail == null ? null : String(raw.statusDetail),
+    error: raw.error == null ? null : String(raw.error),
+    summaryPrd: raw.summaryPrd && typeof raw.summaryPrd === "object" ? raw.summaryPrd : null,
+    deepProfile: raw.deepProfile && typeof raw.deepProfile === "object" ? raw.deepProfile : null,
+    deepProfileUpdatedAt: Number.isFinite(Number(raw.deepProfileUpdatedAt)) ? Number(raw.deepProfileUpdatedAt) : null,
+    chatHistory: sanitizeRagHistory(raw.chatHistory),
+    createdAt: Number.isFinite(Number(raw.createdAt)) ? Number(raw.createdAt) : Date.now(),
+    locationNote:
+      String(raw.locationNote || "").trim() ||
+      "页码通常按字符在全文中的位置占页数比例估算；若与 PDF 阅读器页码不一致，请以 PDF 为准并对照 excerpt。"
+  };
+}
+
+async function persistLibraryStateNow() {
+  if (persistInFlight) {
+    return;
+  }
+  persistInFlight = true;
+  try {
+    await fs.mkdir(FEEDBACK_DIR, { recursive: true });
+    const payload = {
+      savedAt: new Date().toISOString(),
+      documents: Array.from(documents.values()),
+      libraryChatHistory: sanitizeRagHistory(libraryChatHistory)
+    };
+    await fs.writeFile(LIBRARY_STORE_FILE, JSON.stringify(payload), "utf8");
+  } catch (error) {
+    console.error("[persist] library state save failed:", error.message || error);
+  } finally {
+    persistInFlight = false;
+  }
+}
+
+function schedulePersistLibraryState() {
+  if (persistTimer) {
+    clearTimeout(persistTimer);
+  }
+  persistTimer = setTimeout(() => {
+    persistTimer = null;
+    void persistLibraryStateNow();
+  }, 400);
+}
+
+async function loadLibraryStateFromDisk() {
+  try {
+    const rawText = await fs.readFile(LIBRARY_STORE_FILE, "utf8");
+    if (!rawText.trim()) {
+      return;
+    }
+    const payload = JSON.parse(rawText);
+    const docsIn = Array.isArray(payload?.documents) ? payload.documents : [];
+    let loadedCount = 0;
+    for (const row of docsIn) {
+      const doc = normalizeLoadedDoc(row);
+      if (!doc) {
+        continue;
+      }
+      documents.set(doc.id, doc);
+      documentHashIndex.set(doc.fileHash, doc.id);
+      loadedCount += 1;
+    }
+    const history = sanitizeRagHistory(payload?.libraryChatHistory);
+    if (history.length > 0) {
+      libraryChatHistory.splice(0, libraryChatHistory.length, ...history);
+    }
+    console.log(`[persist] loaded ${loadedCount} document(s) from disk.`);
+  } catch (error) {
+    if (error && error.code === "ENOENT") {
+      return;
+    }
+    console.error("[persist] library state load failed:", error.message || error);
+  }
+}
+
+async function resetLibraryState() {
+  documents.clear();
+  documentHashIndex.clear();
+  libraryChatHistory.splice(0, libraryChatHistory.length);
+  responseCache.clear();
+  if (persistTimer) {
+    clearTimeout(persistTimer);
+    persistTimer = null;
+  }
+  try {
+    await fs.unlink(LIBRARY_STORE_FILE);
+  } catch (error) {
+    if (!error || error.code !== "ENOENT") {
+      throw error;
+    }
+  }
+}
 
 const upload = multer({
   storage: multer.memoryStorage(),
@@ -809,6 +925,7 @@ async function ensureDocDeepProfile(doc) {
     const raw = await callChatCompletions(DEFAULT_MODEL, 0.2, buildDeepProfileMessages(doc));
     doc.deepProfile = sanitizeDeepProfile(raw);
     doc.deepProfileUpdatedAt = Date.now();
+    schedulePersistLibraryState();
     return doc.deepProfile;
   } catch (_error) {
     return null;
@@ -859,6 +976,7 @@ function appendDocChatHistory(doc, question, answer) {
   if (max > 0 && doc.chatHistory.length > max) {
     doc.chatHistory = doc.chatHistory.slice(-max);
   }
+  schedulePersistLibraryState();
 }
 
 function buildQuestionKeywords(question) {
@@ -1031,6 +1149,7 @@ function appendLibraryChatHistory(question, answer) {
   if (max > 0 && libraryChatHistory.length > max) {
     libraryChatHistory.splice(0, libraryChatHistory.length - max);
   }
+  schedulePersistLibraryState();
 }
 
 function toIsoDate(ts) {
@@ -1284,6 +1403,7 @@ async function ingestPdfToDocument(buffer, originalFileName) {
     } catch (_error) {
       // 缓存文献刷新失败时，保留原缓存结果，不阻断用户流程。
     }
+    schedulePersistLibraryState();
     return existedDoc;
   }
 
@@ -1319,6 +1439,7 @@ async function ingestPdfToDocument(buffer, originalFileName) {
       doc.statusDetail = "EMPTY_TEXT";
       doc.error =
         "未从 PDF 中提取到可用文本，可能是扫描版 PDF、图片型 PDF，或当前解析器不支持该文件格式。";
+      schedulePersistLibraryState();
       return doc;
     }
     doc.pages = data.numpages || 0;
@@ -1346,12 +1467,14 @@ async function ingestPdfToDocument(buffer, originalFileName) {
       doc.embeddings = null;
       doc.status = "ready_no_embed";
       doc.statusDetail = "MISSING_API_KEY";
+      schedulePersistLibraryState();
       return doc;
     }
 
     if (doc.chunks.length === 0) {
       doc.embeddings = [];
       doc.status = "ready";
+      schedulePersistLibraryState();
       return doc;
     }
 
@@ -1366,11 +1489,13 @@ async function ingestPdfToDocument(buffer, originalFileName) {
     }
     doc.embeddings = vectors;
     doc.status = "ready";
+    schedulePersistLibraryState();
     return doc;
   } catch (error) {
     doc.status = "failed";
     doc.statusDetail = "INGEST_FAILED";
     doc.error = error.message || "文献入库失败";
+    schedulePersistLibraryState();
     return doc;
   }
 }
@@ -1645,6 +1770,22 @@ app.get("/api/library/status", (req, res) => {
   });
 });
 
+app.post("/api/library/reset", async (req, res) => {
+  try {
+    const confirm = String(req.body?.confirm || "").trim().toLowerCase();
+    if (confirm !== "yes") {
+      return res.status(400).json({
+        error: '危险操作：请传入 {"confirm":"yes"} 后重试。',
+        error_code: "RESET_CONFIRM_REQUIRED"
+      });
+    }
+    await resetLibraryState();
+    return res.json({ ok: true, message: "文献库与持久化缓存已清空。" });
+  } catch (error) {
+    return res.status(500).json({ error: error.message || "重置文献库失败", error_code: "RESET_LIBRARY_FAILED" });
+  }
+});
+
 app.post("/api/documents/:id/summarize", summarizeLimiter, async (req, res) => {
   try {
     const doc = getDocumentOrThrow(req.params.id);
@@ -1672,6 +1813,7 @@ app.post("/api/documents/:id/summarize", summarizeLimiter, async (req, res) => {
       const raw = await callChatCompletions(model, temperature, messages);
       const result = sanitizePrdSummary(raw);
       doc.summaryPrd = { ...result, _model: model, _updatedAt: Date.now() };
+      schedulePersistLibraryState();
       const { _model, _updatedAt, ...rest } = doc.summaryPrd;
       return res.json({ result: rest, cached: false });
     } catch (error) {
@@ -2068,7 +2210,20 @@ app.use((err, req, res, _next) => {
   res.status(status).json({ error: isProduction() ? "服务异常，请稍后重试。" : err.message });
 });
 
-app.listen(PORT, HOST, () => {
-  const hint = HOST === "0.0.0.0" ? `http://localhost:${PORT}` : `http://${HOST}:${PORT}`;
-  console.log(`PaperPilot server listening on ${hint} (bind ${HOST}:${PORT})`);
+async function bootstrap() {
+  await loadLibraryStateFromDisk();
+  app.listen(PORT, HOST, () => {
+    const hint = HOST === "0.0.0.0" ? `http://localhost:${PORT}` : `http://${HOST}:${PORT}`;
+    console.log(`PaperPilot server listening on ${hint} (bind ${HOST}:${PORT})`);
+  });
+}
+
+process.on("SIGINT", () => {
+  void persistLibraryStateNow().finally(() => process.exit(0));
 });
+
+process.on("SIGTERM", () => {
+  void persistLibraryStateNow().finally(() => process.exit(0));
+});
+
+void bootstrap();
