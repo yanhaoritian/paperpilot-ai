@@ -10,7 +10,9 @@
   <link rel="stylesheet" href="styles.css">
 </head>
 <body>
-  <div class="page-shell">
+  <div class="app-frame">
+    <div class="app-scroll">
+      <div class="page-shell">
     <header class="hero">
       <nav class="topbar">
         <div class="brand">
@@ -21,9 +23,9 @@
           </div>
         </div>
         <div class="hero-tags">
-          <span>上传 PDF 自动抽取</span>
-          <span>单篇总结 + 多篇对比</span>
-          <span>支持导出 Markdown</span>
+          <span>PDF 解析与分块索引</span>
+          <span>PRD 结构化总结 + RAG 问答</span>
+          <span>单篇视角总结 + 多篇对比</span>
         </div>
       </nav>
 
@@ -32,13 +34,13 @@
           <p class="eyebrow">PaperPilot 智能阅读工作台</p>
           <h1>让论文阅读更快，让研究决策更清晰。</h1>
           <p class="hero-text">
-            上传 PDF 自动抽取摘要，一键生成结构化总结，支持多篇论文横向对比，
-            把阅读收获整理成可执行的建议与可导出的报告。
+            上传 PDF 完成解析与向量索引，一键生成「研究问题 / 方法 / 结论 / 关键词」结构化总结，
+            并支持基于原文片段与引用位置的 RAG 问答；同时保留多视角总结与多篇对比能力。
           </p>
 
           <div class="cta-row">
             <a class="primary-btn" href="#workspace">开始使用</a>
-            <a class="ghost-btn" href="#guide">查看使用指南</a>
+            <a class="ghost-btn" href="#workspace-guide">查看使用指南</a>
           </div>
         </section>
 
@@ -48,10 +50,10 @@
             <span>开始你的第一篇分析</span>
           </div>
           <h2>上传论文，生成清晰结论</h2>
-          <ul class="hero-card-list">
-            <li>支持 PDF 文本抽取与结构化总结</li>
-            <li>自动整理创新点、风险和阅读建议</li>
-            <li>多篇论文可横向对比并导出报告</li>
+            <ul class="hero-card-list">
+            <li>PDF 入库：分块、向量检索（需配置 API Key）</li>
+            <li>研究问题 / 方法 / 结论 / 关键词 结构化输出</li>
+            <li>基于原文片段与页码估算的问答引用</li>
           </ul>
           <div class="confidence">
             <div>
@@ -87,45 +89,120 @@
         <div class="section-heading">
           <p class="section-kicker">Workspace</p>
           <h2>文献分析工作台</h2>
-          <p>输入论文信息或直接上传 PDF，系统会生成结构化总结，并支持多篇论文对比分析。</p>
+          <p>上方区域可滚动浏览；文献多轮对话固定在屏幕底部，输入不受上方滚动影响。</p>
         </div>
+        <p class="status-line status-line--global status-line--top" id="statusLine">提示：按从上到下的顺序操作即可。</p>
 
-        <div class="workspace-grid">
-          <section class="panel input-panel">
-            <div class="panel-header">
-              <h3>输入区</h3>
-              <span>支持论文标题 / 摘要 / 研究目标</span>
-            </div>
-
-            <label class="field">
-              <span>论文标题</span>
-              <input id="paperTitle" type="text" placeholder="例如：Attention Is All You Need">
-            </label>
-
-            <article class="upload-box">
-              <div class="panel-header">
-                <h3>PDF 上传与抽取</h3>
-                <span>从文献直接提取文本</span>
+        <div class="workspace-stack">
+          <div class="workspace-row workspace-row--three">
+            <section class="panel workflow-block workflow-block--guide" id="workspace-guide" aria-labelledby="wf-guide-title">
+              <div class="workflow-block__head">
+                <h3 id="wf-guide-title">如何高效使用</h3>
+                <span>建议先走完整一轮流程，再进入多轮对话</span>
               </div>
-              <label class="field">
+              <div class="quick-guide">
+                <article class="quick-guide__item">
+                  <h4>1. 先解析 PDF</h4>
+                  <p>先建立索引，再做总结与问答，结果更稳。</p>
+                </article>
+                <article class="quick-guide__item">
+                  <h4>2. 再看结构化总结</h4>
+                  <p>先快速掌握问题、方法、结论与关键词。</p>
+                </article>
+                <article class="quick-guide__item">
+                  <h4>3. 最后多轮追问</h4>
+                  <p>底部固定对话栏持续提问，不受上方滚动影响。</p>
+                </article>
+              </div>
+            </section>
+
+            <section class="panel workflow-block workflow-block--pdf" aria-labelledby="wf-pdf-title">
+              <div class="workflow-block__head">
+                <h3 id="wf-pdf-title">解析 PDF 并建立索引</h3>
+                <span>分块 + 向量检索 · 完成后摘要区会自动更新</span>
+              </div>
+              <label class="field field--tight">
                 <span>选择 PDF 文件</span>
                 <input id="pdfFile" type="file" accept="application/pdf">
               </label>
-              <button class="ghost-btn full-width" id="extractBtn" type="button">从 PDF 抽取文本</button>
-              <p class="hint-line" id="pdfSizeHint">提示：单个 PDF 请控制在 32 MB 以内。提取成功后会自动填入下方「摘要」。</p>
-            </article>
+              <div class="action-near-result">
+                <button class="primary-btn workflow-primary-btn" id="extractBtn" type="button">解析 PDF 并建立索引</button>
+                <div class="adjacent-result" aria-live="polite">
+                  <p class="adjacent-result__line" id="pdfSizeHint">提示：单个 PDF 请控制在 32 MB 以内。</p>
+                  <p class="adjacent-result__line adjacent-result__line--emphasis" id="docStatusLine">尚未解析：完成解析后将在此显示文献 ID 与索引状态。</p>
+                </div>
+              </div>
+            </section>
 
-              <label class="field">
-                <span>论文摘要</span>
-                <textarea id="paperAbstract" rows="9" placeholder="可直接粘贴论文摘要，或先上传 PDF 自动定位并回填 Abstract 段。"></textarea>
+            <section class="panel workflow-block" aria-labelledby="wf-meta-title">
+              <div class="workflow-block__head">
+                <h3 id="wf-meta-title">文献信息</h3>
+                <span>标题与摘要 · 后续总结与对比都会用到</span>
+              </div>
+              <label class="field field--tight">
+                <span>论文标题</span>
+                <input id="paperTitle" type="text" placeholder="例如：Attention Is All You Need">
               </label>
+              <label class="field field--tight">
+                <span>论文摘要</span>
+                <textarea id="paperAbstract" rows="7" placeholder="可直接粘贴摘要，或先完成上方「解析 PDF」自动回填。若来自 PDF，分析会优先使用整篇正文。"></textarea>
+              </label>
+            </section>
+          </div>
 
-            <div class="persona-grid">
-              <button class="persona-btn active" data-persona="researcher">算法 / 研究</button>
-              <button class="persona-btn" data-persona="student">学生入门</button>
+          <div class="workspace-row workspace-row--two">
+            <section class="panel workflow-block" aria-labelledby="wf-model-title">
+              <div class="workflow-block__head">
+                <h3 id="wf-model-title">模型配置</h3>
+                <span>结构化总结、文献对话、对比分析共用</span>
+              </div>
+              <article class="api-box api-box--flat">
+                <div class="model-options-row model-options-row--compact">
+                  <label class="field field--inline">
+                    <span>生成模型</span>
+                    <select id="modelName">
+                      <option value="gpt-4.1-mini" selected>gpt-4.1-mini（默认，速度快）</option>
+                      <option value="gpt-4.1">gpt-4.1（质量优先）</option>
+                      <option value="gpt-4o-mini">gpt-4o-mini（轻量）</option>
+                      <option value="gpt-4o">gpt-4o（综合）</option>
+                    </select>
+                  </label>
+                  <label class="field field--inline">
+                    <span>创意程度（0～1）</span>
+                    <input id="temperature" type="number" min="0" max="1" step="0.1" value="0.3">
+                  </label>
+                </div>
+                <p class="compact-note">提示：服务异常时会直接提示错误，不再显示示例占位内容。</p>
+              </article>
+            </section>
+
+            <section class="panel workflow-block workflow-block--prd" aria-labelledby="wf-prd-title">
+              <div class="workflow-block__head">
+                <h3 id="wf-prd-title">结构化总结（PRD）</h3>
+                <span>研究问题 / 方法 / 结论 / 关键词</span>
+              </div>
+              <div class="action-near-result">
+                <button class="primary-btn workflow-primary-btn" id="prdSummarizeBtn" type="button" disabled>
+                  生成结构化总结
+                </button>
+                <div id="prdSummaryOut" class="rag-output muted workflow-output workflow-output--bounded" aria-live="polite">
+                  生成后将在此展示结构化字段。
+                </div>
+              </div>
+            </section>
+
+          </div>
+
+          <section class="panel workflow-block workflow-block--persona" aria-labelledby="wf-persona-title">
+            <div class="workflow-block__head">
+              <h3 id="wf-persona-title">多视角阅读总结</h3>
+              <span>先选视角与目标，再点生成 · 结果紧跟在按钮下方</span>
             </div>
-
-            <label class="field">
+            <div class="persona-grid persona-grid--two">
+              <button class="persona-btn active" type="button" data-persona="researcher">算法 / 研究</button>
+              <button class="persona-btn" type="button" data-persona="student">学生入门</button>
+            </div>
+            <label class="field field--tight">
               <span>阅读目标</span>
               <select id="goalSelect">
                 <option value="decision">快速判断这篇论文值不值得深入读</option>
@@ -133,53 +210,12 @@
                 <option value="application">提炼论文的实际应用启发</option>
               </select>
             </label>
-
-            <article class="api-box">
-              <div class="panel-header">
-                <h3>生成选项</h3>
-                <span>一般保持默认即可</span>
-              </div>
-
-              <label class="field">
-                <span>生成模型</span>
-                <input id="modelName" type="text" value="gpt-4.1-mini">
-              </label>
-
-              <label class="field">
-                <span>创意程度（0～1）</span>
-                <input id="temperature" type="number" min="0" max="1" step="0.1" value="0.3">
-              </label>
-
-              <label class="field">
-                <span>网页地址</span>
-                <input id="backendUrl" type="text" value="" placeholder="一般留空；仅在特殊连接方式下填写">
-              </label>
-
-              <label class="toggle">
-                <input id="fallbackToggle" type="checkbox" checked>
-                <span>生成失败时显示示例排版（内容仅供参考）</span>
-              </label>
-            </article>
-
-            <div class="action-row">
-              <button class="primary-btn full-width" id="generateBtn">使用 AI 生成结果</button>
-              <button class="ghost-btn full-width" id="addCompareBtn">加入对比列表</button>
+            <div class="action-near-result">
+              <button class="primary-btn workflow-primary-btn" id="generateBtn" type="button">生成当前视角总结</button>
+              <p class="inline-hint">生成内容展示在下方卡片中；切换视角后可再次点击生成。</p>
             </div>
 
-            <div class="action-row">
-              <button class="ghost-btn full-width" id="exportBtn">导出 Markdown</button>
-              <button class="ghost-btn full-width" id="clearCompareBtn">清空对比列表</button>
-            </div>
-            <p class="status-line" id="statusLine">提示：填写论文信息或上传 PDF 后即可开始。</p>
-          </section>
-
-          <section class="panel output-panel">
-            <div class="panel-header">
-              <h3>输出区</h3>
-              <span>结构化总结 + 对比洞察</span>
-            </div>
-
-            <div class="summary-head">
+            <div class="summary-head summary-head--tight">
               <p class="summary-label">当前视角</p>
               <h3 id="resultTitle">算法 / 研究视角总结</h3>
               <p id="resultSubtitle">聚焦方法创新、实验结论和是否值得进一步复现。</p>
@@ -188,7 +224,7 @@
             <div class="result-grid">
               <article class="result-card accent">
                 <p id="summaryCardLabel">一句话总结</p>
-                <h4 id="quickSummary">上传论文或输入摘要后，点击“使用 AI 生成结果”。</h4>
+                <h4 id="quickSummary">上传论文或输入摘要后，点击上方「生成当前视角总结」。</h4>
               </article>
               <article class="result-card">
                 <p id="innovationCardLabel">核心创新</p>
@@ -210,7 +246,7 @@
               </article>
             </div>
 
-            <article class="report-card">
+            <article class="report-card report-card--tight">
               <div class="report-header">
                 <div>
                   <p>附加能力</p>
@@ -223,17 +259,25 @@
               </ol>
             </article>
 
-            <article class="report-card compare-card">
-              <div class="report-header">
-                <div>
-                  <p>多篇论文能力</p>
-                  <h4>论文对比分析</h4>
-                </div>
-                <button class="primary-btn compact-btn" id="compareBtn" type="button">生成对比</button>
-              </div>
-              <p class="summary-label">已加入对比列表</p>
-              <ul id="compareList"></ul>
-              <div class="compare-grid">
+            <div class="toolbar-row">
+              <button class="ghost-btn" id="exportBtn" type="button">导出当前总结为 Markdown</button>
+            </div>
+          </section>
+
+          <section class="panel workflow-block workflow-block--compare" aria-labelledby="wf-compare-title">
+            <div class="workflow-block__head">
+              <h3 id="wf-compare-title">多篇论文对比</h3>
+              <span>在上方填好标题与摘要后加入列表，再生成对比</span>
+            </div>
+            <div class="compare-toolbar">
+              <button class="ghost-btn" id="addCompareBtn" type="button">加入对比列表</button>
+              <button class="ghost-btn" id="clearCompareBtn" type="button">删除选中文献</button>
+            </div>
+            <p class="summary-label summary-label--tight">已加入对比列表</p>
+            <ul id="compareList"></ul>
+            <div class="action-near-result">
+              <button class="primary-btn workflow-primary-btn workflow-primary-btn--narrow" id="compareBtn" type="button">生成对比分析</button>
+              <div class="compare-grid compare-grid--tight">
                 <article>
                   <h5>共同主题</h5>
                   <p id="compareTheme">等待生成</p>
@@ -251,34 +295,35 @@
                   <ul id="compareRecommendation"></ul>
                 </article>
               </div>
-            </article>
+            </div>
           </section>
-        </div>
-      </section>
 
-      <section class="section" id="guide">
-        <div class="section-heading">
-          <p class="section-kicker">Guide</p>
-          <h2>如何高效使用</h2>
-          <p>建议按下面流程操作，确保抽取、总结和对比都能得到稳定结果。</p>
-        </div>
-
-        <div class="story-grid">
-          <article class="story-card">
-            <h3>1. 先抽取，再总结</h3>
-            <p>优先上传 PDF 抽取正文，避免只靠标题总结，结果会更准确。</p>
-          </article>
-          <article class="story-card">
-            <h3>2. 角色与阅读目标一起选</h3>
-            <p>「是否深读」「讲解」「落地」三种目标会改变提纲结构与侧重点；与学生入门 / 研究视角搭配使用效果更好。</p>
-          </article>
-          <article class="story-card">
-            <h3>3. 用对比功能做决策</h3>
-            <p>把候选论文加入对比列表，生成差异、机会和下一步实验建议。</p>
-          </article>
         </div>
       </section>
     </main>
+      </div>
+    </div>
+
+    <aside class="chat-dock" id="chatDock" aria-label="文献对话">
+      <div class="chat-dock__head">
+        <div class="chat-dock__title">
+          <span class="chat-dock__dot" aria-hidden="true"></span>
+          <span>文献对话</span>
+          <span class="chat-dock__sub" id="chatDockDocLabel">未绑定文献</span>
+        </div>
+        <button type="button" class="ghost-btn chat-dock__clear" id="ragClearChatBtn">清空对话</button>
+      </div>
+      <div class="chat-dock__messages" id="ragChatMessages" role="log" aria-live="polite" aria-relevant="additions"></div>
+      <div class="chat-dock__composer">
+        <textarea
+          id="ragQuestion"
+          class="rag-question chat-dock__textarea"
+          rows="2"
+          placeholder="解析文献后在此多轮提问…（Enter 发送，Shift+Enter 换行）"
+        ></textarea>
+        <button type="button" class="primary-btn chat-dock__send" id="ragQueryBtn" disabled>发送</button>
+      </div>
+    </aside>
   </div>
 
   <script src="script.js"></script>

@@ -59,10 +59,8 @@ const goalSelect = document.getElementById("goalSelect");
 const generateBtn = document.getElementById("generateBtn");
 const exportBtn = document.getElementById("exportBtn");
 const personaButtons = document.querySelectorAll(".persona-btn");
-const modelInput = document.getElementById("modelName");
+const modelSelect = document.getElementById("modelName");
 const temperatureInput = document.getElementById("temperature");
-const fallbackToggle = document.getElementById("fallbackToggle");
-const backendUrlInput = document.getElementById("backendUrl");
 const statusLine = document.getElementById("statusLine");
 
 const pdfFileInput = document.getElementById("pdfFile");
@@ -75,6 +73,15 @@ const compareTheme = document.getElementById("compareTheme");
 const compareDiff = document.getElementById("compareDiff");
 const compareOpportunity = document.getElementById("compareOpportunity");
 const compareRecommendation = document.getElementById("compareRecommendation");
+
+const docStatusLine = document.getElementById("docStatusLine");
+const prdSummarizeBtn = document.getElementById("prdSummarizeBtn");
+const prdSummaryOut = document.getElementById("prdSummaryOut");
+const ragQuestion = document.getElementById("ragQuestion");
+const ragQueryBtn = document.getElementById("ragQueryBtn");
+const ragChatMessages = document.getElementById("ragChatMessages");
+const ragClearChatBtn = document.getElementById("ragClearChatBtn");
+const chatDockDocLabel = document.getElementById("chatDockDocLabel");
 
 const resultTitle = document.getElementById("resultTitle");
 const resultSubtitle = document.getElementById("resultSubtitle");
@@ -94,6 +101,22 @@ let latestResult = null;
 let compareItems = [];
 let latestComparison = null;
 const resultCache = new Map();
+let latestExtractedFullText = "";
+const selectedCompareTitles = new Set();
+let currentDocumentId = null;
+let currentDocumentName = "";
+/** @type {{ status: string, has_embeddings: boolean, chunk_count: number } | null} */
+let lastDocumentMeta = null;
+let libraryQueryableReady = false;
+/** @type {Array<{ role: string, content: string }>} */
+let ragTurnHistory = [];
+const RAG_CLIENT_HISTORY_CAP = 20;
+const sessionId = (globalThis.crypto?.randomUUID?.() || `${Date.now()}_${Math.random().toString(16).slice(2)}`).slice(
+  0,
+  80
+);
+/** @type {Map<string, any>} */
+const answerFeedbackContext = new Map();
 
 function fillList(target, items) {
   target.innerHTML = "";
@@ -118,7 +141,34 @@ function updateStatus(text, isError = false) {
 
 let cachedMaxPdfMb = 32;
 
-async function syncLimitsFromServer() {
+function updateModelOptions(models, defaultModel) {
+  if (!modelSelect) {
+    return;
+  }
+  const candidates = Array.isArray(models)
+    ? models.map((item) => String(item).trim()).filter(Boolean)
+    : [];
+  const normalizedDefault = String(defaultModel || "").trim();
+  const currentValue = (modelSelect.value || "").trim();
+  const options = candidates.length > 0 ? candidates : [normalizedDefault || currentValue || "gpt-4.1-mini"];
+  const uniqueOptions = Array.from(new Set(options));
+  const selectedValue = uniqueOptions.includes(currentValue)
+    ? currentValue
+    : (uniqueOptions.includes(normalizedDefault) ? normalizedDefault : uniqueOptions[0]);
+
+  modelSelect.innerHTML = "";
+  uniqueOptions.forEach((model) => {
+    const option = document.createElement("option");
+    option.value = model;
+    option.textContent = model;
+    if (model === selectedValue) {
+      option.selected = true;
+    }
+    modelSelect.appendChild(option);
+  });
+}
+
+async function syncConfigFromServer() {
   const hintEl = document.getElementById("pdfSizeHint");
   try {
     const response = await fetch(apiUrl("/api/health"));
@@ -130,9 +180,21 @@ async function syncLimitsFromServer() {
     if (Number.isFinite(mb) && mb > 0) {
       cachedMaxPdfMb = mb;
       if (hintEl) {
-        hintEl.textContent = `提示：单个 PDF 请控制在 ${mb} MB 以内。提取成功后会自动填入下方「摘要」。`;
+        hintEl.textContent = `提示：单个 PDF 请控制在 ${mb} MB 以内。提取后会回填摘要展示，分析时优先使用整篇文本。`;
       }
     }
+    updateModelOptions(data.modelOptions, data.defaultModel);
+    try {
+      const libResp = await fetch(apiUrl("/api/library/status"));
+      if (libResp.ok) {
+        const libData = await libResp.json();
+        libraryQueryableReady = Boolean(libData.has_queryable_docs);
+      }
+    } catch {
+      /* ignore library status errors */
+    }
+    updateRagControls();
+    updateChatDockLabel();
   } catch {
     /* 使用页面默认文案 */
   }
@@ -158,7 +220,7 @@ function getPaperStateKey() {
   const title = titleInput.value.trim();
   const abstract = abstractInput.value.trim();
   const goal = goalSelect.value;
-  return [title, abstract, goal].join("||");
+  return [title, abstract, goal, latestExtractedFullText].join("||");
 }
 
 function saveCurrentResultToCache() {
@@ -175,7 +237,222 @@ function loadCachedResult(personaKey = currentPersona) {
 function clearResultCache() {
   resultCache.clear();
   latestResult = null;
+  currentDocumentId = null;
+  currentDocumentName = "";
+  lastDocumentMeta = null;
+  resetPrdRagUi();
   resetOutputToEmptyState();
+}
+
+function escapeHtml(value) {
+  return String(value || "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
+}
+
+function updateRagControls() {
+  if (!prdSummarizeBtn || !ragQueryBtn) {
+    return;
+  }
+  const st = lastDocumentMeta?.status;
+  const prdOk = Boolean(currentDocumentId) && (st === "ready" || st === "ready_no_embed");
+  prdSummarizeBtn.disabled = !prdOk;
+  const ragOk = libraryQueryableReady;
+  ragQueryBtn.disabled = !ragOk;
+}
+
+function setChatPlaceholder() {
+  if (!ragChatMessages) {
+    return;
+  }
+  ragChatMessages.innerHTML =
+    '<p class="chat-placeholder">文献入库并完成索引后，可在此基于整个文献库持续对话与追问。</p>';
+}
+
+function clearRagConversation({ resetDockLabel = false } = {}) {
+  ragTurnHistory = [];
+  setChatPlaceholder();
+  if (resetDockLabel) {
+    updateChatDockLabel();
+  }
+}
+
+function updateChatDockLabel() {
+  if (!chatDockDocLabel) {
+    return;
+  }
+  if (!libraryQueryableReady) {
+    chatDockDocLabel.textContent = "文献库未就绪";
+    return;
+  }
+  if (!lastDocumentMeta || !currentDocumentId) {
+    chatDockDocLabel.textContent = "文献库可用";
+    return;
+  }
+  const name = currentDocumentName.trim();
+  chatDockDocLabel.textContent = name ? `已入库：${name.slice(0, 20)}${name.length > 20 ? "…" : ""}` : "文献库已就绪";
+}
+
+function scrollChatToBottom() {
+  if (!ragChatMessages) {
+    return;
+  }
+  ragChatMessages.scrollTop = ragChatMessages.scrollHeight;
+}
+
+function appendChatUserBubble(text) {
+  if (!ragChatMessages) {
+    return;
+  }
+  const ph = ragChatMessages.querySelector(".chat-placeholder");
+  if (ph) {
+    ph.remove();
+  }
+  const div = document.createElement("div");
+  div.className = "chat-bubble chat-bubble--user";
+  div.textContent = text;
+  ragChatMessages.appendChild(div);
+  scrollChatToBottom();
+}
+
+function appendChatErrorBubble(message) {
+  if (!ragChatMessages) {
+    return;
+  }
+  const ph = ragChatMessages.querySelector(".chat-placeholder");
+  if (ph) {
+    ph.remove();
+  }
+  const div = document.createElement("div");
+  div.className = "chat-bubble chat-bubble--assistant chat-bubble--error";
+  const p = document.createElement("p");
+  p.className = "chat-bubble__body";
+  p.textContent = message;
+  div.appendChild(p);
+  ragChatMessages.appendChild(div);
+  scrollChatToBottom();
+}
+
+async function sendAnswerFeedback(answerId, vote, wrongQuestionType = false) {
+  const ctx = answerFeedbackContext.get(answerId);
+  if (!ctx) {
+    return;
+  }
+  await fetch(apiUrl("/api/feedback"), {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      answer_id: answerId,
+      vote,
+      wrong_question_type: Boolean(wrongQuestionType),
+      question: ctx.question,
+      answer: ctx.answer,
+      intent: ctx.intent,
+      document_scope: ctx.document_scope,
+      document_ids: ctx.document_ids,
+      retrieval_hit_count: ctx.retrieval_hit_count,
+      client_time: new Date().toISOString(),
+      session_id: sessionId
+    })
+  });
+}
+
+function appendChatAssistantBubble(payload, questionText) {
+  if (!ragChatMessages) {
+    return;
+  }
+  const ph = ragChatMessages.querySelector(".chat-placeholder");
+  if (ph) {
+    ph.remove();
+  }
+  const degraded = Boolean(payload.degraded);
+  const result = payload.result || {};
+  const answerId =
+    (payload?.result?.answer_id && String(payload.result.answer_id).trim()) ||
+    `${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+  const documentIds = Array.isArray(result?.citations)
+    ? result.citations.map((c) => c.document_id).filter(Boolean)
+    : [];
+  answerFeedbackContext.set(answerId, {
+    question: String(questionText || "").trim(),
+    answer: String(result.answer || "").trim(),
+    intent: String(payload?.retrieval?.intent || "unknown"),
+    document_scope: "library",
+    document_ids: Array.from(new Set(documentIds)).slice(0, 30),
+    retrieval_hit_count: Number(payload?.retrieval?.hit_count || 0)
+  });
+  const wrap = document.createElement("div");
+  wrap.className = "chat-bubble chat-bubble--assistant";
+  wrap.innerHTML = [
+    degraded ? "<p><strong>提示：</strong>本次为证据不足或降级路径返回。</p>" : "",
+    `<p class="chat-bubble__body">${escapeHtml(result.answer || "")}</p>`,
+    `<p class="citation-meta">置信度：${escapeHtml(result.confidence || "N/A")}${
+      result.out_of_scope ? " · 可能超出文献范围" : ""
+    }</p>`,
+    `<div class="answer-feedback" data-answer-id="${escapeHtml(answerId)}">
+      <button type="button" class="feedback-btn" data-vote="up" title="有帮助">👍</button>
+      <button type="button" class="feedback-btn" data-vote="down" title="没帮助">👎</button>
+      <label class="feedback-tag">
+        <input type="checkbox" class="feedback-wrong-type"> 问题类型错误
+      </label>
+    </div>`
+  ].join("");
+  const feedbackRoot = wrap.querySelector(".answer-feedback");
+  if (feedbackRoot) {
+    const upBtn = feedbackRoot.querySelector('button[data-vote="up"]');
+    const downBtn = feedbackRoot.querySelector('button[data-vote="down"]');
+    const wrongTypeEl = feedbackRoot.querySelector(".feedback-wrong-type");
+    const submit = async (vote) => {
+      if (!upBtn || !downBtn) return;
+      upBtn.disabled = true;
+      downBtn.disabled = true;
+      try {
+        await sendAnswerFeedback(answerId, vote, Boolean(wrongTypeEl?.checked));
+        feedbackRoot.classList.add("submitted");
+      } catch (_error) {
+        upBtn.disabled = false;
+        downBtn.disabled = false;
+      }
+    };
+    if (upBtn) upBtn.addEventListener("click", () => submit("up"));
+    if (downBtn) downBtn.addEventListener("click", () => submit("down"));
+  }
+  ragChatMessages.appendChild(wrap);
+  scrollChatToBottom();
+}
+
+function resetPrdRagUi() {
+  if (prdSummaryOut) {
+    prdSummaryOut.classList.add("muted");
+    prdSummaryOut.textContent = "生成后将在此展示结构化字段。";
+  }
+  if (ragQuestion) {
+    ragQuestion.value = "";
+  }
+  if (docStatusLine) {
+    docStatusLine.textContent = "尚未解析：完成解析后将在此显示入库状态与分块信息。";
+  }
+  clearRagConversation({ resetDockLabel: true });
+  updateRagControls();
+}
+
+function renderPrdSummary(result) {
+  if (!prdSummaryOut) {
+    return;
+  }
+  prdSummaryOut.classList.remove("muted");
+  const keywords = Array.isArray(result.keywords) ? result.keywords : [];
+  const kw = keywords.map((k) => `<span class="keyword-chip">${escapeHtml(k)}</span>`).join("");
+  prdSummaryOut.innerHTML = [
+    `<div class="prd-block"><h5>研究问题</h5><p>${escapeHtml(result.researchQuestion)}</p></div>`,
+    `<div class="prd-block"><h5>方法</h5><p>${escapeHtml(result.methods)}</p></div>`,
+    `<div class="prd-block"><h5>结论</h5><p>${escapeHtml(result.conclusions)}</p></div>`,
+    `<div class="prd-block"><h5>关键词</h5><div class="keyword-row">${
+      kw || '<span class="keyword-chip">—</span>'
+    }</div></div>`
+  ].join("");
 }
 
 function resetOutputToEmptyState() {
@@ -183,7 +460,7 @@ function resetOutputToEmptyState() {
   resultTitle.textContent = persona.title;
   resultSubtitle.textContent = persona.subtitle;
   updateOutputLabels();
-  quickSummary.textContent = "上传论文或输入摘要后，点击“使用 AI 生成结果”。";
+  quickSummary.textContent = "上传论文或输入摘要后，点击「生成当前视角总结」。";
   innovationList.innerHTML = "<li>生成后将在这里展示关键创新点。</li>";
   riskList.innerHTML = "<li>生成后将在这里展示实验结论与风险提示。</li>";
   actionList.innerHTML = "<li>生成后将在这里展示阅读建议与应用方向。</li>";
@@ -207,15 +484,10 @@ function updateOutputLabels() {
   outlineCardTitle.textContent = "汇报提纲生成";
 }
 
-function getBackendUrl() {
-  return (backendUrlInput.value || "").trim().replace(/\/$/, "");
-}
-
 /** 服务地址留空时，请求发到当前网页所在站点 */
 function apiUrl(path) {
-  const base = getBackendUrl();
   const p = path.startsWith("/") ? path : `/${path}`;
-  return base ? `${base}${p}` : p;
+  return p;
 }
 
 function buildFallbackResult() {
@@ -377,7 +649,24 @@ function renderCompareList() {
   compareList.innerHTML = "";
   compareItems.forEach((item, index) => {
     const li = document.createElement("li");
-    li.textContent = `${index + 1}. ${item.title}`;
+    const label = document.createElement("label");
+    label.className = "compare-item-label";
+    const checkbox = document.createElement("input");
+    checkbox.type = "checkbox";
+    checkbox.className = "compare-item-checkbox";
+    checkbox.checked = selectedCompareTitles.has(item.title);
+    checkbox.addEventListener("change", () => {
+      if (checkbox.checked) {
+        selectedCompareTitles.add(item.title);
+      } else {
+        selectedCompareTitles.delete(item.title);
+      }
+    });
+    const text = document.createElement("span");
+    text.textContent = `${index + 1}. ${item.title}`;
+    label.appendChild(checkbox);
+    label.appendChild(text);
+    li.appendChild(label);
     compareList.appendChild(li);
   });
 }
@@ -385,6 +674,9 @@ function renderCompareList() {
 function setLoading(button, loadingText, isLoading) {
   button.disabled = isLoading;
   button.textContent = isLoading ? loadingText : button.dataset.defaultText;
+  if (button.classList.contains("workflow-primary-btn")) {
+    button.classList.toggle("is-loading", isLoading);
+  }
 }
 
 function getActivePersonaLabel() {
@@ -392,14 +684,16 @@ function getActivePersonaLabel() {
 }
 
 function getSummaryPayload() {
+  const displayAbstract = abstractInput.value.trim();
   return {
     paperTitle: titleInput.value.trim() || "未命名论文",
-    paperAbstract: abstractInput.value.trim() || "未提供摘要",
+    paperAbstract: displayAbstract || "未提供摘要",
+    paperFullText: latestExtractedFullText || displayAbstract || "",
     personaKey: currentPersona,
     personaLabel: getActivePersonaLabel(),
     goal: goalSelect.value,
     goalLabel: goalSelect.options[goalSelect.selectedIndex]?.text || "快速判断",
-    model: (modelInput.value || "").trim(),
+    model: (modelSelect.value || "").trim(),
     temperature: Number.parseFloat(temperatureInput.value || "0.3")
   };
 }
@@ -428,14 +722,7 @@ async function renderResult() {
     applyResult(latestResult);
     updateStatus("总结已生成。");
   } catch (error) {
-    if (fallbackToggle.checked) {
-      latestResult = buildFallbackResult();
-      saveCurrentResultToCache();
-      applyResult(latestResult);
-      updateStatus(`本次未成功连接生成服务，已显示示例内容。原因：${error.message}`, true);
-    } else {
-      updateStatus(error.message, true);
-    }
+    updateStatus(error.message, true);
   } finally {
     setLoading(generateBtn, "生成中，请稍候...", false);
   }
@@ -452,33 +739,153 @@ async function extractFromPdf() {
     updateStatus(`文件超过当前上限（${cachedMaxPdfMb} MB），请选用更小的 PDF 或压缩后再试。`, true);
     return;
   }
-  setLoading(extractBtn, "抽取中...", true);
-  updateStatus("正在从 PDF 中提取摘要…");
+  setLoading(extractBtn, "解析并入库中...", true);
+  updateStatus("正在解析 PDF、分块并构建向量索引（可能需要数秒）…");
   try {
     const formData = new FormData();
     formData.append("pdf", file);
-    const response = await fetch(apiUrl("/api/extract-pdf"), {
+    const response = await fetch(apiUrl("/api/documents"), {
       method: "POST",
       body: formData
     });
+    const raw = await response.text();
+    let data = {};
+    try {
+      data = raw ? JSON.parse(raw) : {};
+    } catch {
+      data = {};
+    }
     if (!response.ok) {
-      const msg = await readErrorMessage(response);
+      currentDocumentId = null;
+      lastDocumentMeta = null;
+      updateRagControls();
+      const msg =
+        (typeof data.error === "string" && data.error.trim()) ||
+        (raw && raw.length < 500 ? raw.trim() : "") ||
+        "解析或入库失败，请稍后再试。";
       throw new Error(msg);
     }
-    const data = await response.json();
-    if (!data.abstract || !data.abstract.trim()) {
-      throw new Error("PDF 已上传，但没有定位到摘要部分。");
+    const extractedFullText = (data.fullText || data.text || "").trim();
+    const extractedAbstract = (data.abstract || "").trim();
+    if (!extractedFullText) {
+      throw new Error("PDF 已上传，但未提取到可用于分析的文本。");
     }
     clearResultCache();
-    abstractInput.value = data.abstract;
+    latestExtractedFullText = extractedFullText;
+    abstractInput.value = extractedAbstract || extractedFullText.slice(0, 1200);
     if (data.fileName && data.fileName.trim()) {
       titleInput.value = data.fileName.replace(/\.pdf$/i, "");
     }
-    updateStatus("摘要已从 PDF 填入，可检查下方文本后点击生成总结。");
+    currentDocumentId = data.document_id || null;
+    currentDocumentName = (data.fileName || "").replace(/\.pdf$/i, "").trim();
+    lastDocumentMeta = {
+      status: data.status || "unknown",
+      has_embeddings: Boolean(data.has_embeddings),
+      chunk_count: Number(data.chunk_count) || 0
+    };
+    libraryQueryableReady = libraryQueryableReady || Boolean(data.has_embeddings);
+    updateRagControls();
+    updateChatDockLabel();
+    const ragHint = data.has_embeddings
+      ? "已加入文献库，可与库中所有文献联合对话。"
+      : "未检测到向量索引：配置 OPENAI_API_KEY 后重新解析，方可使用底部对话。";
+    if (docStatusLine) {
+      docStatusLine.textContent = `已入库：${currentDocumentName || "未命名文献"} · 分块 ${lastDocumentMeta.chunk_count} · ${ragHint}`;
+    }
+    updateStatus("解析完成：摘要已回填；PRD 总结在上方，文献对话请用屏幕底部输入框。");
+    if (ragQuestion && data.has_embeddings) {
+      requestAnimationFrame(() => ragQuestion.focus());
+    }
   } catch (error) {
     updateStatus(error.message, true);
   } finally {
-    setLoading(extractBtn, "抽取中...", false);
+    setLoading(extractBtn, "解析并入库中...", false);
+  }
+}
+
+async function runPrdSummarize() {
+  if (!currentDocumentId) {
+    updateStatus("请先完成 PDF 解析入库。", true);
+    return;
+  }
+  setLoading(prdSummarizeBtn, "生成中…", true);
+  updateStatus("正在生成 PRD 结构化总结…");
+  try {
+    const payload = {
+      model: (modelSelect.value || "").trim(),
+      temperature: Number.parseFloat(temperatureInput.value || "0.3")
+    };
+    const data = await postJson(`/api/documents/${encodeURIComponent(currentDocumentId)}/summarize`, payload);
+    renderPrdSummary(data.result || {});
+    const hint = data.cached ? "（命中缓存）" : "";
+    const warn = data.degraded ? ` 降级提示：${data.warning || ""}` : "";
+    updateStatus(`结构化总结已更新${hint}。${warn}`.trim());
+  } catch (error) {
+    updateStatus(error.message, true);
+  } finally {
+    setLoading(prdSummarizeBtn, "生成中…", false);
+  }
+}
+
+async function runRagQuery() {
+  if (!ragQueryBtn || ragQueryBtn.disabled) {
+    return;
+  }
+  if (!libraryQueryableReady) {
+    updateStatus("文献库尚未就绪，请先上传并完成索引。", true);
+    return;
+  }
+  const q = (ragQuestion?.value || "").trim();
+  if (!q) {
+    updateStatus("请先输入要提问的内容。", true);
+    return;
+  }
+  const historyForApi = ragTurnHistory.map((m) => ({ role: m.role, content: m.content }));
+  appendChatUserBubble(q);
+  if (ragQuestion) {
+    ragQuestion.value = "";
+  }
+  setLoading(ragQueryBtn, "发送中…", true);
+  updateStatus("正在检索相关片段并生成回答…");
+  try {
+    const payload = {
+      question: q,
+      history: historyForApi,
+      model: (modelSelect.value || "").trim(),
+      temperature: Number.parseFloat(temperatureInput.value || "0.3")
+    };
+    const response = await fetch(apiUrl("/api/library/query"), {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload)
+    });
+    const raw = await response.text();
+    let data = {};
+    try {
+      data = raw ? JSON.parse(raw) : {};
+    } catch {
+      data = {};
+    }
+    if (!response.ok) {
+      const msg =
+        (typeof data.error === "string" && data.error.trim()) ||
+        (raw && raw.length < 500 ? raw.trim() : "") ||
+        "问答请求失败，请稍后再试。";
+      throw new Error(msg);
+    }
+    appendChatAssistantBubble(data, q);
+    const ans = String(data?.result?.answer || "").trim();
+    ragTurnHistory.push({ role: "user", content: q });
+    ragTurnHistory.push({ role: "assistant", content: ans || "（无文本回答）" });
+    if (ragTurnHistory.length > RAG_CLIENT_HISTORY_CAP) {
+      ragTurnHistory = ragTurnHistory.slice(-RAG_CLIENT_HISTORY_CAP);
+    }
+    updateStatus("已回复，可继续追问。");
+  } catch (error) {
+    appendChatErrorBubble(error.message || "请求失败");
+    updateStatus(error.message, true);
+  } finally {
+    setLoading(ragQueryBtn, "发送中…", false);
   }
 }
 
@@ -495,17 +902,25 @@ function addCurrentPaperToCompare() {
       title,
       abstract: text
     });
+    selectedCompareTitles.delete(title);
   }
   renderCompareList();
   updateStatus(`已加入对比列表，当前共 ${compareItems.length} 篇。`);
 }
 
 function clearCompare() {
-  compareItems = [];
+  if (selectedCompareTitles.size === 0) {
+    updateStatus("请先勾选要删除的文献。", true);
+    return;
+  }
+  const beforeCount = compareItems.length;
+  compareItems = compareItems.filter((item) => !selectedCompareTitles.has(item.title));
+  const removedCount = beforeCount - compareItems.length;
+  selectedCompareTitles.clear();
   latestComparison = null;
   renderCompareList();
   applyComparison(buildFallbackComparison());
-  updateStatus("已清空对比列表。");
+  updateStatus(`已删除 ${removedCount} 篇文献，当前剩余 ${compareItems.length} 篇。`);
 }
 
 async function generateCompare() {
@@ -522,7 +937,7 @@ async function generateCompare() {
       personaLabel: getActivePersonaLabel(),
       goal: goalSelect.value,
       goalLabel: goalSelect.options[goalSelect.selectedIndex]?.text || "快速判断",
-      model: (modelInput.value || "").trim(),
+      model: (modelSelect.value || "").trim(),
       temperature: Number.parseFloat(temperatureInput.value || "0.3")
     };
     const data = await postJson("/api/compare", payload);
@@ -530,13 +945,7 @@ async function generateCompare() {
     applyComparison(latestComparison);
     updateStatus("对比结果已生成。");
   } catch (error) {
-    if (fallbackToggle.checked) {
-      latestComparison = buildFallbackComparison();
-      applyComparison(latestComparison);
-      updateStatus(`本次未成功连接生成服务，已显示示例对比。原因：${error.message}`, true);
-    } else {
-      updateStatus(error.message, true);
-    }
+    updateStatus(error.message, true);
   } finally {
     setLoading(compareBtn, "对比中...", false);
   }
@@ -617,22 +1026,54 @@ personaButtons.forEach((button) => {
 });
 
 titleInput.addEventListener("input", clearResultCache);
-abstractInput.addEventListener("input", clearResultCache);
+abstractInput.addEventListener("input", () => {
+  latestExtractedFullText = "";
+  clearResultCache();
+});
 goalSelect.addEventListener("change", clearResultCache);
 
 extractBtn.dataset.defaultText = extractBtn.textContent;
 generateBtn.dataset.defaultText = generateBtn.textContent;
 compareBtn.dataset.defaultText = compareBtn.textContent;
+if (prdSummarizeBtn) {
+  prdSummarizeBtn.dataset.defaultText = prdSummarizeBtn.textContent.trim();
+}
+if (ragQueryBtn) {
+  ragQueryBtn.dataset.defaultText = ragQueryBtn.textContent.trim();
+}
 
 extractBtn.addEventListener("click", extractFromPdf);
+if (prdSummarizeBtn) {
+  prdSummarizeBtn.addEventListener("click", runPrdSummarize);
+}
+if (ragQueryBtn) {
+  ragQueryBtn.addEventListener("click", runRagQuery);
+}
+if (ragClearChatBtn) {
+  ragClearChatBtn.addEventListener("click", () => {
+    clearRagConversation({ resetDockLabel: false });
+    updateStatus("已清空本轮对话记录（未解绑文献）。");
+  });
+}
+if (ragQuestion) {
+  ragQuestion.addEventListener("keydown", (event) => {
+    if (event.key !== "Enter" || event.shiftKey) {
+      return;
+    }
+    event.preventDefault();
+    runRagQuery();
+  });
+}
 generateBtn.addEventListener("click", renderResult);
 addCompareBtn.addEventListener("click", addCurrentPaperToCompare);
 clearCompareBtn.addEventListener("click", clearCompare);
 compareBtn.addEventListener("click", generateCompare);
 exportBtn.addEventListener("click", exportMarkdown);
 
+resetPrdRagUi();
 resetOutputToEmptyState();
 applyComparison(buildFallbackComparison());
 renderCompareList();
+updateChatDockLabel();
 
-syncLimitsFromServer();
+syncConfigFromServer();

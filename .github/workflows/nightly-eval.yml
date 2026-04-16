@@ -1,0 +1,55 @@
+name: Nightly Eval
+
+on:
+  schedule:
+    # 每天 UTC 16:00 ≈ 北京时间 00:00
+    - cron: "0 16 * * *"
+  workflow_dispatch:
+
+jobs:
+  eval:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run eval and capture output
+        id: run_eval
+        shell: bash
+        run: |
+          mkdir -p data
+          npm run eval | tee eval-output.txt
+          {
+            echo "eval_output<<EOF"
+            cat eval-output.txt
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Append GitHub Summary
+        shell: bash
+        run: |
+          {
+            echo "## Nightly Eval Result"
+            echo ""
+            echo '```text'
+            cat eval-output.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload eval artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: nightly-eval-output
+          path: eval-output.txt
+          if-no-files-found: error
+
