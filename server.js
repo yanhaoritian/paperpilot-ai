@@ -991,20 +991,51 @@ function buildQuestionKeywords(question) {
   if (/研究区|区域|地点|剖面|测线|盆地|断裂带|井|台站/i.test(q)) {
     explicit.push("研究区", "区域", "地点", "剖面", "测线", "盆地", "断裂带", "台站");
   }
+  // 追问「结果/结论/发现」时补充学术语，避免只命中引言背景段
+  if (
+    /结果怎样|主要结果|研究结论|论文结论|结论是什么|得出什么|主要发现|表明|说明|讨论|反演|认识|特征|极性|电性|缝合/i.test(
+      q
+    )
+  ) {
+    explicit.push(
+      "结论",
+      "讨论",
+      "结果",
+      "表明",
+      "显示",
+      "反演",
+      "认识",
+      "解释",
+      "特征",
+      "电性结构",
+      "缝合带",
+      "俯冲"
+    );
+  }
   const extracted = (q.match(/[\u4e00-\u9fffA-Za-z0-9]{2,}/g) || []).filter((t) => t.length >= 2);
   const stop = new Set(["这篇", "文章", "论文", "什么", "如何", "是否", "以及", "主要", "进行", "关于"]);
   const merged = Array.from(new Set([...explicit, ...extracted])).filter((t) => !stop.has(t));
-  return merged.slice(0, 20);
+  return merged.slice(0, 24);
 }
 
 function inferQuestionIntent(question) {
   const q = String(question || "").toLowerCase();
   const rules = [
     { intent: "research_problem", patterns: [/研究问题|要解决什么|核心问题|问题定义|problem statement|research question/i] },
+    // 须在 experiment 之前：「结果怎样」等易被误判为实验类，扩展问句会偏向实验设置而非结论讨论
+    {
+      intent: "findings",
+      patterns: [
+        /结果怎样|主要结果|研究结论|论文结论|结论是什么|得出什么结论|主要发现|论文的发现|文章的结果|这篇.*结果|文章.*结果|论文.*结果/i,
+        /表明了什么|说明了什么|讨论认|结果与讨论|反演得到了|反演结果|三维反演.*结果|认识.*特征|写得怎样|写得如何/i,
+        /findings?\b|main results?\b|conclusions?\b/i
+      ]
+    },
     { intent: "method", patterns: [/方法|模型|算法|流程|框架|思路|技术路线|how does|approach|methodology/i] },
     { intent: "innovation", patterns: [/创新|新意|贡献|亮点|改进点|contribution|novelty/i] },
     { intent: "data_source", patterns: [/数据来源|资料来源|数据集|样本|采集|观测|数据库|study area|dataset|source/i] },
-    { intent: "experiment", patterns: [/实验|对比|指标|评价|结果|消融|ablation|benchmark|metric/i] },
+    // 不含单独「结果」二字，避免与 findings 冲突；实验指标类仍用「实验结果」「指标」等
+    { intent: "experiment", patterns: [/实验|对比|指标|评价|消融|ablation|benchmark|metric|实验结果|指标结果/i] },
     { intent: "limitation", patterns: [/局限|不足|缺点|假设|边界|适用范围|limitation|future work/i] },
     { intent: "application", patterns: [/应用|落地|场景|工程|实践|部署|application|use case/i] }
   ];
@@ -1019,10 +1050,24 @@ function inferQuestionIntent(question) {
 function intentKeywords(intent) {
   const map = {
     research_problem: ["研究问题", "问题", "目标", "挑战", "背景", "动机"],
+    findings: [
+      "结论",
+      "讨论",
+      "结果",
+      "表明",
+      "显示",
+      "反演",
+      "认识",
+      "解释",
+      "特征",
+      "电性",
+      "缝合",
+      "俯冲"
+    ],
     method: ["方法", "模型", "算法", "流程", "框架", "步骤"],
     innovation: ["创新", "贡献", "新", "改进", "优势"],
     data_source: ["数据", "来源", "数据集", "样本", "采集", "观测", "研究区", "剖面", "测线"],
-    experiment: ["实验", "对比", "指标", "结果", "评价", "消融"],
+    experiment: ["实验", "对比", "指标", "评价", "消融"],
     limitation: ["局限", "不足", "假设", "边界", "适用"],
     application: ["应用", "场景", "工程", "部署", "落地"]
   };
@@ -1035,6 +1080,11 @@ function buildExpandedQuestions(question, intent) {
   if (!q) return expansions;
   const map = {
     research_problem: ["这篇论文主要要解决什么科学问题？", "作者关注的核心问题与研究目标是什么？"],
+    findings: [
+      "论文在讨论或结论部分得出的主要认识与结果是什么？",
+      "反演或主要分析得到了什么电性结构或地质解释？",
+      "作者对研究区构造或俯冲极性等得出了什么结论？"
+    ],
     method: ["论文的核心方法流程是什么？", "关键模型/算法步骤如何设计？"],
     innovation: ["与已有方法相比，主要创新贡献是什么？", "这篇工作的新意体现在哪些方面？"],
     data_source: ["论文的数据来源、数据集或采集方式是什么？", "研究区/样本/观测资料来自哪里？"],
@@ -1082,6 +1132,50 @@ function dataSourceRuleHitsForDoc(doc, topK) {
     .map((chunk, index) => ({
       index,
       score: organizationHintScore(chunk.text)
+    }))
+    .filter((x) => x.score > 0)
+    .sort((a, b) => b.score - a.score);
+  return scored.slice(0, topK);
+}
+
+/** 结论/讨论/反演结果等段落常含用语，用于 findings 意图下补充召回 */
+function findingsDiscussionHintScore(text) {
+  const t = String(text || "");
+  if (!t) return 0;
+  let score = 0;
+  const strong = [
+    /结果表明/,
+    /研究显示/,
+    /综上/,
+    /主要结论/,
+    /讨论认为/,
+    /主要认识/,
+    /反演得到/,
+    /反演结果/,
+    /电性结构/,
+    /三维反演/,
+    /缝合带/,
+    /俯冲.*极性/,
+    /认识如下/,
+    /结论表明/,
+    /据此认为/,
+    /揭示.*特征/
+  ];
+  for (const p of strong) {
+    if (p.test(t)) score += 4;
+  }
+  if (/结论|结果与讨论|讨论部分|本章小结|研究得出/i.test(t)) score += 2;
+  return score;
+}
+
+function findingsRuleHitsForDoc(doc, topK) {
+  if (!doc || !Array.isArray(doc.chunks)) {
+    return [];
+  }
+  const scored = doc.chunks
+    .map((chunk, index) => ({
+      index,
+      score: findingsDiscussionHintScore(chunk.text)
     }))
     .filter((x) => x.score > 0)
     .sort((a, b) => b.score - a.score);
@@ -1182,6 +1276,12 @@ function looksLikeBroadSummaryQuestion(question) {
     "内容是什么",
     "介绍一下",
     "核心内容",
+    "结果怎样",
+    "结论怎样",
+    "主要结论",
+    "论文结果",
+    "文章结果",
+    "得出什么",
     "what is this paper about",
     "main idea",
     "summary"
@@ -1917,6 +2017,10 @@ app.post("/api/documents/:id/query", documentQueryLimiter, async (req, res) => {
       const ruleHits = dataSourceRuleHitsForDoc(doc, effectiveTop);
       selectedHits = mergeDocHits(selectedHits, ruleHits, effectiveTop);
     }
+    if (intent === "findings") {
+      const ruleHits = findingsRuleHitsForDoc(doc, effectiveTop);
+      selectedHits = mergeDocHits(selectedHits, ruleHits, effectiveTop);
+    }
     const allowedChunkIds = selectedHits.map((h) => doc.chunks[h.index]?.chunk_id).filter(Boolean);
 
     if (selectedHits.length === 0) {
@@ -2056,6 +2160,24 @@ app.post("/api/library/query", documentQueryLimiter, async (req, res) => {
       merged.sort((a, b) => b.score - a.score);
       return merged.slice(0, effectiveTop);
     };
+    const collectFindingsRuleHits = () => {
+      const merged = [];
+      for (const doc of queryableDocs) {
+        const docHits = findingsRuleHitsForDoc(doc, effectiveTop);
+        for (const h of docHits) {
+          const chunk = doc.chunks[h.index];
+          if (!chunk) continue;
+          merged.push({
+            doc,
+            chunk,
+            score: Math.min(0.28, 0.08 + h.score * 0.025),
+            ref_id: `${doc.id}::${chunk.chunk_id}`
+          });
+        }
+      }
+      merged.sort((a, b) => b.score - a.score);
+      return merged.slice(0, effectiveTop);
+    };
 
     let selected = collectHits(RAG_MIN_SIMILARITY);
     let usedRelaxedRetrieval = false;
@@ -2084,6 +2206,20 @@ app.post("/api/library/query", documentQueryLimiter, async (req, res) => {
     }
     if (isDataSourceIntent(intent, question)) {
       const ruleHits = collectRuleHits();
+      if (ruleHits.length > 0) {
+        const seen = new Set(selected.map((r) => r.ref_id));
+        for (const row of ruleHits) {
+          if (!seen.has(row.ref_id)) {
+            selected.push(row);
+            seen.add(row.ref_id);
+          }
+        }
+        selected.sort((a, b) => b.score - a.score);
+        selected = selected.slice(0, effectiveTop);
+      }
+    }
+    if (intent === "findings") {
+      const ruleHits = collectFindingsRuleHits();
       if (ruleHits.length > 0) {
         const seen = new Set(selected.map((r) => r.ref_id));
         for (const row of ruleHits) {
