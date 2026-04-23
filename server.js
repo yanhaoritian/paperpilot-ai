@@ -2402,10 +2402,29 @@ app.post("/api/feedback", async (req, res) => {
     if (vote !== "up" && vote !== "down") {
       return res.status(400).json({ error: "vote 仅支持 up/down。", error_code: "INVALID_VOTE" });
     }
+    const allowedErrorTags = new Set([
+      "intent_mismatch",
+      "retrieval_miss",
+      "retrieval_noise",
+      "citation_invalid",
+      "answer_incomplete",
+      "answer_incorrect"
+    ]);
+    const errorTags = Array.isArray(body.error_tags)
+      ? body.error_tags
+          .map((x) => String(x || "").trim())
+          .filter((x) => allowedErrorTags.has(x))
+          .slice(0, 5)
+      : [];
+    const topScores = Array.isArray(body.retrieval_top_scores)
+      ? body.retrieval_top_scores.map((x) => Number(x)).filter((x) => Number.isFinite(x)).slice(0, 3)
+      : [];
     const record = {
+      schema_version: "2.0",
       answer_id: answerId,
       vote,
       wrong_question_type: Boolean(body.wrong_question_type),
+      error_tags: errorTags,
       question: String(body.question || "").trim().slice(0, 4000),
       answer: String(body.answer || "").trim().slice(0, 12000),
       intent: String(body.intent || "unknown").trim(),
@@ -2416,6 +2435,12 @@ app.post("/api/feedback", async (req, res) => {
       retrieval_hit_count: Number.isFinite(Number(body.retrieval_hit_count))
         ? Number(body.retrieval_hit_count)
         : null,
+      retrieval_top_scores: topScores,
+      retrieval_score_gap: Number.isFinite(Number(body.retrieval_score_gap)) ? Number(body.retrieval_score_gap) : null,
+      used_relaxed_threshold: Boolean(body.used_relaxed_threshold),
+      citation_count: Number.isFinite(Number(body.citation_count)) ? Number(body.citation_count) : null,
+      degraded: Boolean(body.degraded),
+      feedback_source: String(body.feedback_source || "explicit").trim().slice(0, 40),
       client_time: String(body.client_time || "").trim(),
       client_day: toIsoDate(body.client_time || Date.now()),
       session_id: String(body.session_id || "").trim().slice(0, 120)

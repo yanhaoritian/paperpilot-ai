@@ -394,7 +394,24 @@ function appendChatErrorBubble(message) {
   scrollChatToBottom();
 }
 
-async function sendAnswerFeedback(answerId, vote, wrongQuestionType = false) {
+const FEEDBACK_ERROR_TAG_OPTIONS = [
+  { key: "intent_mismatch", label: "问题类型识别错" },
+  { key: "retrieval_miss", label: "没检到关键证据" },
+  { key: "retrieval_noise", label: "检索噪音大" },
+  { key: "citation_invalid", label: "引用不可信" },
+  { key: "answer_incomplete", label: "回答不完整" },
+  { key: "answer_incorrect", label: "回答不正确" }
+];
+
+function collectFeedbackErrorTags(root) {
+  if (!root) return [];
+  return Array.from(root.querySelectorAll(".feedback-error-tag input[type='checkbox']:checked"))
+    .map((el) => String(el.value || "").trim())
+    .filter(Boolean)
+    .slice(0, 5);
+}
+
+async function sendAnswerFeedback(answerId, vote, wrongQuestionType = false, errorTags = []) {
   const ctx = answerFeedbackContext.get(answerId);
   if (!ctx) {
     return;
@@ -406,12 +423,19 @@ async function sendAnswerFeedback(answerId, vote, wrongQuestionType = false) {
       answer_id: answerId,
       vote,
       wrong_question_type: Boolean(wrongQuestionType),
+      error_tags: Array.isArray(errorTags) ? errorTags.slice(0, 5) : [],
       question: ctx.question,
       answer: ctx.answer,
       intent: ctx.intent,
       document_scope: ctx.document_scope,
       document_ids: ctx.document_ids,
       retrieval_hit_count: ctx.retrieval_hit_count,
+      retrieval_top_scores: ctx.retrieval_top_scores,
+      retrieval_score_gap: ctx.retrieval_score_gap,
+      used_relaxed_threshold: ctx.used_relaxed_threshold,
+      citation_count: ctx.citation_count,
+      degraded: ctx.degraded,
+      feedback_source: "explicit",
       client_time: new Date().toISOString(),
       session_id: sessionId
     })
@@ -440,7 +464,19 @@ function appendChatAssistantBubble(payload, questionText) {
     intent: String(payload?.retrieval?.intent || "unknown"),
     document_scope: "library",
     document_ids: Array.from(new Set(documentIds)).slice(0, 30),
-    retrieval_hit_count: Number(payload?.retrieval?.hit_count || 0)
+    retrieval_hit_count: Number(payload?.retrieval?.hit_count || 0),
+    retrieval_top_scores: Array.isArray(payload?.retrieval?.scores)
+      ? payload.retrieval.scores.map((s) => Number(s?.score)).filter((n) => Number.isFinite(n)).slice(0, 3)
+      : [],
+    retrieval_score_gap: (() => {
+      const arr = Array.isArray(payload?.retrieval?.scores)
+        ? payload.retrieval.scores.map((s) => Number(s?.score)).filter((n) => Number.isFinite(n))
+        : [];
+      return arr.length >= 2 ? Number((arr[0] - arr[1]).toFixed(4)) : null;
+    })(),
+    used_relaxed_threshold: Boolean(payload?.retrieval?.used_relaxed_threshold),
+    citation_count: Array.isArray(result?.citations) ? result.citations.length : 0,
+    degraded
   });
   const wrap = document.createElement("div");
   wrap.className = "chat-bubble chat-bubble--assistant";
@@ -457,6 +493,13 @@ function appendChatAssistantBubble(payload, questionText) {
       <label class="feedback-tag">
         <input type="checkbox" class="feedback-wrong-type"> 问题类型错误
       </label>
+      <div class="feedback-error-tags">
+        ${FEEDBACK_ERROR_TAG_OPTIONS.map(
+          (item) => `<label class="feedback-error-tag"><input type="checkbox" value="${escapeHtml(item.key)}"> ${escapeHtml(
+            item.label
+          )}</label>`
+        ).join("")}
+      </div>
     </div>`
   ].join("");
   const citations = Array.isArray(result.citations) ? result.citations : [];
@@ -501,8 +544,9 @@ function appendChatAssistantBubble(payload, questionText) {
       if (!upBtn || !downBtn) return;
       upBtn.disabled = true;
       downBtn.disabled = true;
+      const errorTags = collectFeedbackErrorTags(feedbackRoot);
       try {
-        await sendAnswerFeedback(answerId, vote, Boolean(wrongTypeEl?.checked));
+        await sendAnswerFeedback(answerId, vote, Boolean(wrongTypeEl?.checked), errorTags);
         feedbackRoot.classList.add("submitted");
       } catch (_error) {
         upBtn.disabled = false;
