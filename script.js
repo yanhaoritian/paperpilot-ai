@@ -82,6 +82,11 @@ const ragQueryBtn = document.getElementById("ragQueryBtn");
 const ragChatMessages = document.getElementById("ragChatMessages");
 const ragClearChatBtn = document.getElementById("ragClearChatBtn");
 const chatDockDocLabel = document.getElementById("chatDockDocLabel");
+const ragPromptChips = document.getElementById("ragPromptChips");
+const healthLibraryState = document.getElementById("healthLibraryState");
+const healthModelName = document.getElementById("healthModelName");
+const healthRetrievalHit = document.getElementById("healthRetrievalHit");
+const healthResponsePath = document.getElementById("healthResponsePath");
 
 const resultTitle = document.getElementById("resultTitle");
 const resultSubtitle = document.getElementById("resultSubtitle");
@@ -137,6 +142,21 @@ function toArray(value, fallback) {
 function updateStatus(text, isError = false) {
   statusLine.textContent = `提示：${text}`;
   statusLine.classList.toggle("error", isError);
+}
+
+function updateWorkspaceHealth({ retrievalHit, degraded } = {}) {
+  if (healthModelName && modelSelect) {
+    healthModelName.textContent = (modelSelect.value || "gpt-4.1-mini").trim() || "gpt-4.1-mini";
+  }
+  if (healthLibraryState) {
+    healthLibraryState.textContent = libraryQueryableReady ? "可问答" : "未就绪";
+  }
+  if (healthRetrievalHit && Number.isFinite(Number(retrievalHit))) {
+    healthRetrievalHit.textContent = String(Number(retrievalHit));
+  }
+  if (healthResponsePath && typeof degraded === "boolean") {
+    healthResponsePath.textContent = degraded ? "降级/宽松召回" : "标准";
+  }
 }
 
 let cachedMaxPdfMb = 32;
@@ -195,6 +215,7 @@ async function syncConfigFromServer() {
     }
     updateRagControls();
     updateChatDockLabel();
+    updateWorkspaceHealth();
   } catch {
     /* 使用页面默认文案 */
   }
@@ -252,6 +273,43 @@ function escapeHtml(value) {
     .replace(/"/g, "&quot;");
 }
 
+function escapeRegExp(value) {
+  return String(value || "").replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function highlightAnswerExcerpt(wrap, excerpt) {
+  if (!wrap) return;
+  const bodyEl = wrap.querySelector(".chat-bubble__body");
+  if (!bodyEl) return;
+  const originalAnswer = String(bodyEl.getAttribute("data-answer-text") || bodyEl.textContent || "");
+  const target = String(excerpt || "").trim();
+  if (!target) {
+    bodyEl.textContent = originalAnswer;
+    return;
+  }
+  const idx = originalAnswer.indexOf(target);
+  if (idx < 0) {
+    bodyEl.textContent = originalAnswer;
+    return;
+  }
+  const before = originalAnswer.slice(0, idx);
+  const hit = originalAnswer.slice(idx, idx + target.length);
+  const after = originalAnswer.slice(idx + target.length);
+  bodyEl.innerHTML = `${escapeHtml(before)}<mark class="answer-highlight">${escapeHtml(hit)}</mark>${escapeHtml(after)}`;
+}
+
+function updatePromptChipsByIntent(intent) {
+  if (!ragPromptChips) return;
+  const targetIntent = String(intent || "").trim();
+  const chips = Array.from(ragPromptChips.querySelectorAll(".prompt-chip"));
+  chips.forEach((chip) => chip.classList.remove("prompt-chip--recommended"));
+  if (!targetIntent) return;
+  const matched = chips.find((chip) => String(chip.getAttribute("data-intent-key") || "") === targetIntent);
+  if (!matched) return;
+  matched.classList.add("prompt-chip--recommended");
+  ragPromptChips.prepend(matched);
+}
+
 function updateRagControls() {
   if (!prdSummarizeBtn || !ragQueryBtn) {
     return;
@@ -277,6 +335,7 @@ function clearRagConversation({ resetDockLabel = false } = {}) {
   if (resetDockLabel) {
     updateChatDockLabel();
   }
+  updateWorkspaceHealth({ retrievalHit: 0 });
 }
 
 function updateChatDockLabel() {
@@ -385,9 +444,10 @@ function appendChatAssistantBubble(payload, questionText) {
   });
   const wrap = document.createElement("div");
   wrap.className = "chat-bubble chat-bubble--assistant";
+  const answerText = String(result.answer || "");
   wrap.innerHTML = [
     degraded ? "<p><strong>提示：</strong>本次为证据不足或降级路径返回。</p>" : "",
-    `<p class="chat-bubble__body">${escapeHtml(result.answer || "")}</p>`,
+    `<p class="chat-bubble__body" data-answer-text="${escapeHtml(answerText)}">${escapeHtml(answerText)}</p>`,
     `<p class="citation-meta">置信度：${escapeHtml(result.confidence || "N/A")}${
       result.out_of_scope ? " · 可能超出文献范围" : ""
     }</p>`,
@@ -399,6 +459,39 @@ function appendChatAssistantBubble(payload, questionText) {
       </label>
     </div>`
   ].join("");
+  const citations = Array.isArray(result.citations) ? result.citations : [];
+  if (citations.length > 0) {
+    const citeWrap = document.createElement("div");
+    citeWrap.className = "chat-bubble__cites";
+    const cards = citations
+      .slice(0, 6)
+      .map((c) => {
+        const docName = c.document_name ? `文献：${escapeHtml(c.document_name)} · ` : "";
+        const page =
+          c.page_start != null
+            ? `页码：${escapeHtml(c.page_start)}${
+                c.page_end != null && c.page_end !== c.page_start ? `-${escapeHtml(c.page_end)}` : ""
+              }`
+            : "页码：未知";
+        return `<article class="citation-card" role="button" tabindex="0" data-excerpt="${escapeHtml(c.excerpt || "")}">
+          <p class="citation-meta">${docName}chunk：${escapeHtml(c.chunk_id || "N/A")} · ${page}</p>
+          <p>${escapeHtml(c.excerpt || "").slice(0, 260)}</p>
+        </article>`;
+      })
+      .join("");
+    citeWrap.innerHTML = `<p class="citation-title">引用证据</p><div class="citation-stack">${cards}</div>`;
+    wrap.appendChild(citeWrap);
+  } else if (degraded) {
+    const tips = document.createElement("div");
+    tips.className = "chat-bubble__rewrite";
+    tips.innerHTML = `<p class="citation-title">建议改写问题</p>
+      <div class="rewrite-chip-row">
+        <button type="button" class="rewrite-chip" data-q="请说明这篇论文的方法流程与关键模块。">问方法流程</button>
+        <button type="button" class="rewrite-chip" data-q="请给出论文的数据来源、样本与实验设置。">问数据与实验</button>
+        <button type="button" class="rewrite-chip" data-q="请总结作者的主要结论和证据。">问结论与证据</button>
+      </div>`;
+    wrap.appendChild(tips);
+  }
   const feedbackRoot = wrap.querySelector(".answer-feedback");
   if (feedbackRoot) {
     const upBtn = feedbackRoot.querySelector('button[data-vote="up"]');
@@ -420,6 +513,32 @@ function appendChatAssistantBubble(payload, questionText) {
     if (downBtn) downBtn.addEventListener("click", () => submit("down"));
   }
   ragChatMessages.appendChild(wrap);
+  wrap.querySelectorAll(".rewrite-chip").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      if (!ragQuestion) return;
+      ragQuestion.value = String(btn.getAttribute("data-q") || "").trim();
+      ragQuestion.focus();
+    });
+  });
+  wrap.querySelectorAll(".citation-card").forEach((card) => {
+    const activate = () => {
+      wrap.querySelectorAll(".citation-card").forEach((el) => el.classList.remove("citation-card--active"));
+      card.classList.add("citation-card--active");
+      highlightAnswerExcerpt(wrap, card.getAttribute("data-excerpt") || "");
+    };
+    card.addEventListener("click", activate);
+    card.addEventListener("keydown", (event) => {
+      if (event.key === "Enter" || event.key === " ") {
+        event.preventDefault();
+        activate();
+      }
+    });
+  });
+  updateWorkspaceHealth({
+    retrievalHit: Number(payload?.retrieval?.hit_count || 0),
+    degraded
+  });
+  updatePromptChipsByIntent(payload?.retrieval?.intent || "");
   scrollChatToBottom();
 }
 
@@ -1064,6 +1183,18 @@ if (ragQuestion) {
     runRagQuery();
   });
 }
+if (ragPromptChips) {
+  ragPromptChips.querySelectorAll(".prompt-chip").forEach((chip) => {
+    chip.addEventListener("click", () => {
+      if (!ragQuestion) return;
+      ragQuestion.value = String(chip.getAttribute("data-q") || "").trim();
+      ragQuestion.focus();
+    });
+  });
+}
+if (modelSelect) {
+  modelSelect.addEventListener("change", () => updateWorkspaceHealth());
+}
 generateBtn.addEventListener("click", renderResult);
 addCompareBtn.addEventListener("click", addCurrentPaperToCompare);
 clearCompareBtn.addEventListener("click", clearCompare);
@@ -1075,5 +1206,6 @@ resetOutputToEmptyState();
 applyComparison(buildFallbackComparison());
 renderCompareList();
 updateChatDockLabel();
+updateWorkspaceHealth();
 
 syncConfigFromServer();

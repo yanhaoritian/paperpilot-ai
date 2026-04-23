@@ -92,6 +92,24 @@
           <p>上方区域可滚动浏览；文献多轮对话固定在屏幕底部，输入不受上方滚动影响。</p>
         </div>
         <p class="status-line status-line--global status-line--top" id="statusLine">提示：按从上到下的顺序操作即可。</p>
+        <section class="workspace-health" aria-label="实时状态面板">
+          <article class="workspace-health__item">
+            <p>文献库状态</p>
+            <strong id="healthLibraryState">未就绪</strong>
+          </article>
+          <article class="workspace-health__item">
+            <p>当前模型</p>
+            <strong id="healthModelName">gpt-4.1-mini</strong>
+          </article>
+          <article class="workspace-health__item">
+            <p>最近检索命中</p>
+            <strong id="healthRetrievalHit">0</strong>
+          </article>
+          <article class="workspace-health__item">
+            <p>回答路径</p>
+            <strong id="healthResponsePath">标准</strong>
+          </article>
+        </section>
 
         <div class="workspace-stack">
           <div class="workspace-row workspace-row--three">
@@ -314,6 +332,13 @@
         <button type="button" class="ghost-btn chat-dock__clear" id="ragClearChatBtn">清空对话</button>
       </div>
       <div class="chat-dock__messages" id="ragChatMessages" role="log" aria-live="polite" aria-relevant="additions"></div>
+      <div class="chat-dock__chips" id="ragPromptChips" aria-label="推荐提问模板">
+        <button type="button" class="prompt-chip" data-intent-key="research_problem" data-q="这篇论文主要解决了什么研究问题？">研究问题</button>
+        <button type="button" class="prompt-chip" data-intent-key="method" data-q="这篇论文的方法流程可以分成哪几步？">方法流程</button>
+        <button type="button" class="prompt-chip" data-intent-key="data_source" data-q="论文的数据来源和实验设置是什么？">数据来源/实验</button>
+        <button type="button" class="prompt-chip" data-intent-key="findings" data-q="作者最终得出了哪些关键结论？">关键结论</button>
+        <button type="button" class="prompt-chip" data-intent-key="limitation" data-q="这篇工作的局限性和下一步方向是什么？">局限性</button>
+      </div>
       <div class="chat-dock__composer">
         <textarea
           id="ragQuestion"

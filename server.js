@@ -8,6 +8,7 @@ const helmet = require("helmet");
 const pdfParse = require("pdf-parse");
 const dotenv = require("dotenv");
 const rag = require("./rag");
+const { compileRagGraph, runRagGraph } = require("./graph/ragGraph");
 
 dotenv.config();
 
@@ -72,6 +73,11 @@ const RESPONSE_CACHE_TTL_MS = parsePositiveInt("RESPONSE_CACHE_TTL_MS", 10 * 60 
   min: 10 * 1000,
   max: 24 * 60 * 60 * 1000
 });
+
+const ENABLE_LANGGRAPH_CHECKPOINTS = ["1", "true", "yes"].includes(
+  String(process.env.LANGGRAPH_CHECKPOINTS || "").toLowerCase()
+);
+const LANGGRAPH_CHECKPOINT_FILE = (process.env.LANGGRAPH_CHECKPOINT_FILE || "").trim();
 
 function parseModelOptions(raw) {
   const text = String(raw || "").trim();
@@ -1934,6 +1940,337 @@ app.post("/api/documents/:id/summarize", summarizeLimiter, async (req, res) => {
   }
 });
 
+let _compiledRagGraph = null;
+function getCompiledRagGraph() {
+  if (_compiledRagGraph) return _compiledRagGraph;
+
+  const env = {
+    apiKey: OPENAI_API_KEY,
+    baseURL: OPENAI_BASE_URL,
+    defaultModel: DEFAULT_MODEL,
+    embeddingModel: EMBEDDING_MODEL,
+    embedBatchSize: EMBED_BATCH_SIZE,
+    ragTopK: RAG_TOP_K,
+    checkpointFilePath:
+      LANGGRAPH_CHECKPOINT_FILE || path.resolve(__dirname, "data", "langgraph-checkpoints.json")
+  };
+
+  const helpers = {
+    inferQuestionIntent,
+    buildExpandedQuestions,
+    noHitsResult: (state) => {
+      if (state.scope === "library") {
+        return {
+          answer: "文献库中未检索到足够相关片段，暂无法可靠回答。建议问题更具体（方法名、实验设置、数据集等）。",
+          citations: [],
+          confidence: "N/A",
+          out_of_scope: false
+        };
+      }
+      return {
+        answer:
+          "未在文献中检索到与该问题足够相关的片段，暂无法基于原文可靠作答。建议把问题写得更具体（例如指定方法名、数据集或实验设置），或围绕论文的研究问题 / 方法 / 结论改写提问。",
+        citations: [],
+        confidence: "N/A",
+        out_of_scope: false
+      };
+    },
+    retrieve: async (state, { topK }) => {
+      const intent = state.intent || inferQuestionIntent(state.question);
+      const question = String(state.question || "").trim();
+      const effectiveTop = Number.isFinite(Number(topK)) ? Math.min(24, Math.max(1, Math.floor(topK))) : RAG_TOP_K;
+      const qVectors = Array.isArray(state.qVectors) ? state.qVectors : [];
+      if (qVectors.length === 0) {
+        throw new Error("问题向量化失败。");
+      }
+
+      if (state.scope === "document") {
+        const doc = state.allowed?.doc;
+        const questionKeywords = Array.from(new Set([...buildQuestionKeywords(question), ...intentKeywords(intent)]));
+
+        const unionHits = [];
+        const seenHit = new Set();
+        for (const vec of qVectors) {
+          const hits = rag.topKIndices(vec, doc.embeddings, effectiveTop, RAG_MIN_SIMILARITY);
+          for (const h of hits) {
+            if (!seenHit.has(h.index)) {
+              unionHits.push(h);
+              seenHit.add(h.index);
+            }
+          }
+        }
+        unionHits.sort((a, b) => b.score - a.score);
+        let selectedHits = unionHits.slice(0, effectiveTop);
+
+        let usedRelaxedRetrieval = false;
+        if (selectedHits.length === 0) {
+          const relaxedThreshold = looksLikeBroadSummaryQuestion(question)
+            ? Math.min(RAG_RELAXED_MIN_SIMILARITY, RAG_MIN_SIMILARITY)
+            : Math.min(0.12, RAG_MIN_SIMILARITY);
+          const relaxedHitsRaw = [];
+          const seenRelaxed = new Set();
+          for (const vec of qVectors) {
+            const rows = rag.topKIndices(vec, doc.embeddings, effectiveTop, relaxedThreshold);
+            for (const r of rows) {
+              if (!seenRelaxed.has(r.index)) {
+                relaxedHitsRaw.push(r);
+                seenRelaxed.add(r.index);
+              }
+            }
+          }
+          relaxedHitsRaw.sort((a, b) => b.score - a.score);
+          const relaxedHits = relaxedHitsRaw.slice(0, effectiveTop);
+          if (relaxedHits.length > 0) {
+            selectedHits = relaxedHits;
+            usedRelaxedRetrieval = true;
+          }
+        }
+
+        const keywordHits = keywordSearchDocChunks(doc, questionKeywords, effectiveTop);
+        selectedHits = mergeDocHits(selectedHits, keywordHits, effectiveTop);
+        if (isDataSourceIntent(intent, question)) {
+          const ruleHits = dataSourceRuleHitsForDoc(doc, effectiveTop);
+          selectedHits = mergeDocHits(selectedHits, ruleHits, effectiveTop);
+        }
+        if (intent === "findings") {
+          const ruleHits = findingsRuleHitsForDoc(doc, effectiveTop);
+          selectedHits = mergeDocHits(selectedHits, ruleHits, effectiveTop);
+        }
+
+        const allowedChunkIds = selectedHits.map((h) => doc.chunks[h.index]?.chunk_id).filter(Boolean);
+
+        return {
+          retrieved: selectedHits,
+          degraded: usedRelaxedRetrieval,
+          retrievalMeta: {
+            hit_count: selectedHits.length,
+            min_score: RAG_MIN_SIMILARITY,
+            used_relaxed_threshold: usedRelaxedRetrieval,
+            relaxed_min_score: usedRelaxedRetrieval ? RAG_RELAXED_MIN_SIMILARITY : null,
+            scores: selectedHits.map((h) => ({
+              chunk_id: doc.chunks[h.index]?.chunk_id,
+              score: Number(h.score.toFixed(4))
+            })),
+            intent
+          },
+          allowed: { ...state.allowed, allowedChunkIds }
+        };
+      }
+
+      const queryableDocs = getQueryableDocs();
+      const questionKeywords = Array.from(new Set([...buildQuestionKeywords(question), ...intentKeywords(intent)]));
+      const collectHits = (threshold) => {
+        const merged = [];
+        for (const doc of queryableDocs) {
+          const seen = new Set();
+          for (const vec of qVectors) {
+            const docHits = rag.topKIndices(vec, doc.embeddings, effectiveTop, threshold);
+            for (const h of docHits) {
+              if (seen.has(h.index)) continue;
+              seen.add(h.index);
+              const chunk = doc.chunks[h.index];
+              if (!chunk) continue;
+              merged.push({ doc, chunk, score: h.score, ref_id: `${doc.id}::${chunk.chunk_id}` });
+            }
+          }
+        }
+        merged.sort((a, b) => b.score - a.score);
+        return merged.slice(0, effectiveTop);
+      };
+      const collectKeywordHits = () => {
+        const merged = [];
+        for (const doc of queryableDocs) {
+          const docHits = keywordSearchDocChunks(doc, questionKeywords, effectiveTop);
+          for (const h of docHits) {
+            const chunk = doc.chunks[h.index];
+            if (!chunk) continue;
+            merged.push({
+              doc,
+              chunk,
+              score: Math.min(0.25, 0.05 + h.score * 0.03),
+              ref_id: `${doc.id}::${chunk.chunk_id}`
+            });
+          }
+        }
+        merged.sort((a, b) => b.score - a.score);
+        return merged.slice(0, effectiveTop);
+      };
+      const collectRuleHits = () => {
+        const merged = [];
+        for (const doc of queryableDocs) {
+          const docHits = dataSourceRuleHitsForDoc(doc, effectiveTop);
+          for (const h of docHits) {
+            const chunk = doc.chunks[h.index];
+            if (!chunk) continue;
+            merged.push({
+              doc,
+              chunk,
+              score: Math.min(0.28, 0.08 + h.score * 0.025),
+              ref_id: `${doc.id}::${chunk.chunk_id}`
+            });
+          }
+        }
+        merged.sort((a, b) => b.score - a.score);
+        return merged.slice(0, effectiveTop);
+      };
+      const collectFindingsRuleHits = () => {
+        const merged = [];
+        for (const doc of queryableDocs) {
+          const docHits = findingsRuleHitsForDoc(doc, effectiveTop);
+          for (const h of docHits) {
+            const chunk = doc.chunks[h.index];
+            if (!chunk) continue;
+            merged.push({
+              doc,
+              chunk,
+              score: Math.min(0.28, 0.08 + h.score * 0.025),
+              ref_id: `${doc.id}::${chunk.chunk_id}`
+            });
+          }
+        }
+        merged.sort((a, b) => b.score - a.score);
+        return merged.slice(0, effectiveTop);
+      };
+
+      let selected = collectHits(RAG_MIN_SIMILARITY);
+      let usedRelaxedRetrieval = false;
+      if (selected.length === 0) {
+        const relaxedThreshold = looksLikeBroadSummaryQuestion(question)
+          ? Math.min(RAG_RELAXED_MIN_SIMILARITY, RAG_MIN_SIMILARITY)
+          : Math.min(0.12, RAG_MIN_SIMILARITY);
+        const relaxed = collectHits(relaxedThreshold);
+        if (relaxed.length > 0) {
+          selected = relaxed;
+          usedRelaxedRetrieval = true;
+        }
+      }
+
+      const keywordHits = collectKeywordHits();
+      if (keywordHits.length > 0) {
+        const seen = new Set(selected.map((r) => r.ref_id));
+        for (const row of keywordHits) {
+          if (!seen.has(row.ref_id)) {
+            selected.push(row);
+            seen.add(row.ref_id);
+          }
+        }
+        selected.sort((a, b) => b.score - a.score);
+        selected = selected.slice(0, effectiveTop);
+      }
+      if (isDataSourceIntent(intent, question)) {
+        const ruleHits = collectRuleHits();
+        if (ruleHits.length > 0) {
+          const seen = new Set(selected.map((r) => r.ref_id));
+          for (const row of ruleHits) {
+            if (!seen.has(row.ref_id)) {
+              selected.push(row);
+              seen.add(row.ref_id);
+            }
+          }
+          selected.sort((a, b) => b.score - a.score);
+          selected = selected.slice(0, effectiveTop);
+        }
+      }
+      if (intent === "findings") {
+        const ruleHits = collectFindingsRuleHits();
+        if (ruleHits.length > 0) {
+          const seen = new Set(selected.map((r) => r.ref_id));
+          for (const row of ruleHits) {
+            if (!seen.has(row.ref_id)) {
+              selected.push(row);
+              seen.add(row.ref_id);
+            }
+          }
+          selected.sort((a, b) => b.score - a.score);
+          selected = selected.slice(0, effectiveTop);
+        }
+      }
+
+      return {
+        retrieved: selected,
+        degraded: usedRelaxedRetrieval,
+        retrievalMeta: {
+          hit_count: selected.length,
+          min_score: RAG_MIN_SIMILARITY,
+          used_relaxed_threshold: usedRelaxedRetrieval,
+          relaxed_min_score: usedRelaxedRetrieval ? RAG_RELAXED_MIN_SIMILARITY : null,
+          scores: selected.map((h) => ({
+            ref_id: h.ref_id,
+            document_name: h.doc.fileName,
+            score: Number(h.score.toFixed(4))
+          })),
+          intent
+        }
+      };
+    },
+    ensureProfiles: async (retrieved) => {
+      for (const row of retrieved || []) {
+        await ensureDocDeepProfile(row.doc);
+      }
+    },
+    buildMessages: async (state) => {
+      const question = String(state.question || "").trim();
+      if (state.scope === "document") {
+        const doc = state.allowed?.doc;
+        return buildRagQueryMessages(doc, question, state.retrieved, state.history);
+      }
+      return buildLibraryRagQueryMessages(question, state.retrieved, state.history);
+    },
+    validateAndSanitize: async (state) => {
+      const raw = state.rawModelJson ?? parseModelJson(state.rawModelText);
+      if (state.scope === "document") {
+        const doc = state.allowed?.doc;
+        const allowedChunkIds = state.allowed?.allowedChunkIds || [];
+        let parsed = sanitizeRagQueryResult(raw, allowedChunkIds);
+        parsed = { ...parsed, citations: enrichCitationsFromDoc(doc, parsed.citations) };
+        parsed = {
+          ...parsed,
+          citations: parsed.citations.map((c) => {
+            const ch = doc.chunks.find((x) => x.chunk_id === c.chunk_id);
+            if (!ch) return c;
+            const ex = String(c.excerpt || "").trim();
+            if (ex && ch.text.includes(ex)) return c;
+            return { ...c, excerpt: ch.text.slice(0, 180) };
+          })
+        };
+        return { result: parsed };
+      }
+
+      const refMap = new Map((state.retrieved || []).map((r) => [r.ref_id, r]));
+      const parsed = sanitizeLibraryRagQueryResult(raw, refMap);
+      const fixed = {
+        ...parsed,
+        citations: parsed.citations.map((c) => {
+          const refId = `${c.document_id}::${c.chunk_id}`;
+          const ref = refMap.get(refId);
+          if (!ref) return c;
+          const ex = String(c.excerpt || "").trim();
+          if (ex && ref.chunk.text.includes(ex)) return c;
+          return { ...c, excerpt: ref.chunk.text.slice(0, 180) };
+        })
+      };
+      return { result: fixed };
+    },
+    persistHistory: async (state) => {
+      const q = String(state.question || "").trim();
+      const a = String(state.result?.answer || "").trim();
+      if (!q || !a) return;
+      if (state.scope === "document") {
+        appendDocChatHistory(state.allowed?.doc, q, a);
+        return;
+      }
+      appendLibraryChatHistory(q, a);
+      for (const c of state.result?.citations || []) {
+        const doc = documents.get(c.document_id);
+        if (doc) appendDocChatHistory(doc, q, a);
+      }
+    }
+  };
+
+  _compiledRagGraph = compileRagGraph({ env, helpers, useCheckpoint: ENABLE_LANGGRAPH_CHECKPOINTS });
+  return _compiledRagGraph;
+}
+
 app.post("/api/documents/:id/query", documentQueryLimiter, async (req, res) => {
   try {
     const doc = getDocumentOrThrow(req.params.id);
@@ -1961,112 +2298,41 @@ app.post("/api/documents/:id/query", documentQueryLimiter, async (req, res) => {
       });
     }
 
-    const requestedTop = Number(req.body?.top_k);
-    const effectiveTop = Number.isFinite(requestedTop)
-      ? Math.min(24, Math.max(1, Math.floor(requestedTop)))
-      : RAG_TOP_K;
-    const intent = inferQuestionIntent(question);
-    const questionKeywords = Array.from(new Set([...buildQuestionKeywords(question), ...intentKeywords(intent)]));
-    const expandedQuestions = buildExpandedQuestions(question, intent);
-
-    const qVectors = await embedTextsBatch(expandedQuestions);
-    if (!qVectors || qVectors.length === 0) {
-      return res.status(500).json({ error: "问题向量化失败。", error_code: "EMBED_QUERY_FAILED" });
-    }
-    const qVec = qVectors[0];
-    const unionHits = [];
-    const seenHit = new Set();
-    for (const vec of qVectors) {
-      const hits = rag.topKIndices(vec, doc.embeddings, effectiveTop, RAG_MIN_SIMILARITY);
-      for (const h of hits) {
-        if (!seenHit.has(h.index)) {
-          unionHits.push(h);
-          seenHit.add(h.index);
-        }
-      }
-    }
-    unionHits.sort((a, b) => b.score - a.score);
-    const hits = unionHits.slice(0, effectiveTop);
-    let selectedHits = hits;
-    let usedRelaxedRetrieval = false;
-    if (selectedHits.length === 0) {
-      const relaxedThreshold = looksLikeBroadSummaryQuestion(question)
-        ? Math.min(RAG_RELAXED_MIN_SIMILARITY, RAG_MIN_SIMILARITY)
-        : Math.min(0.12, RAG_MIN_SIMILARITY);
-      const relaxedHitsRaw = [];
-      const seenRelaxed = new Set();
-      for (const vec of qVectors) {
-        const rows = rag.topKIndices(vec, doc.embeddings, effectiveTop, relaxedThreshold);
-        for (const r of rows) {
-          if (!seenRelaxed.has(r.index)) {
-            relaxedHitsRaw.push(r);
-            seenRelaxed.add(r.index);
-          }
-        }
-      }
-      relaxedHitsRaw.sort((a, b) => b.score - a.score);
-      const relaxedHits = relaxedHitsRaw.slice(0, effectiveTop);
-      if (relaxedHits.length > 0) {
-        selectedHits = relaxedHits;
-        usedRelaxedRetrieval = true;
-      }
-    }
-    const keywordHits = keywordSearchDocChunks(doc, questionKeywords, effectiveTop);
-    selectedHits = mergeDocHits(selectedHits, keywordHits, effectiveTop);
-    if (isDataSourceIntent(intent, question)) {
-      const ruleHits = dataSourceRuleHitsForDoc(doc, effectiveTop);
-      selectedHits = mergeDocHits(selectedHits, ruleHits, effectiveTop);
-    }
-    if (intent === "findings") {
-      const ruleHits = findingsRuleHitsForDoc(doc, effectiveTop);
-      selectedHits = mergeDocHits(selectedHits, ruleHits, effectiveTop);
-    }
-    const allowedChunkIds = selectedHits.map((h) => doc.chunks[h.index]?.chunk_id).filter(Boolean);
-
-    if (selectedHits.length === 0) {
-      return res.json({
-        result: {
-          answer:
-            "未在文献中检索到与该问题足够相关的片段，暂无法基于原文可靠作答。建议把问题写得更具体（例如指定方法名、数据集或实验设置），或围绕论文的研究问题 / 方法 / 结论改写提问。",
-          citations: [],
-          confidence: "N/A",
-          out_of_scope: false
-        },
-        degraded: true,
-        retrieval: { hit_count: 0, min_score: RAG_MIN_SIMILARITY, scores: [] }
-      });
-    }
-
     const model = String(req.body?.model || DEFAULT_MODEL).trim();
     const temperature = Number(req.body?.temperature);
     const clientHistory = sanitizeRagHistory(req.body?.history);
     const docHistory = sanitizeRagHistory(doc.chatHistory);
     const history = clientHistory.length > 0 ? clientHistory : docHistory;
-    const messages = buildRagQueryMessages(doc, question, selectedHits, history);
-    const raw = await callChatCompletions(model, temperature, messages);
-    let parsed = sanitizeRagQueryResult(raw, allowedChunkIds);
-    parsed = {
-      ...parsed,
-      citations: enrichCitationsFromDoc(doc, parsed.citations)
-    };
-    appendDocChatHistory(doc, question, parsed.answer);
+    const requestedTop = Number(req.body?.top_k);
+    const effectiveTop = Number.isFinite(requestedTop)
+      ? Math.min(24, Math.max(1, Math.floor(requestedTop)))
+      : RAG_TOP_K;
 
-    return res.json({
-      result: parsed,
-      cached: false,
-      degraded: usedRelaxedRetrieval,
-      retrieval: {
-        hit_count: selectedHits.length,
-        min_score: RAG_MIN_SIMILARITY,
-        used_relaxed_threshold: usedRelaxedRetrieval,
-        relaxed_min_score: usedRelaxedRetrieval ? RAG_RELAXED_MIN_SIMILARITY : null,
-        scores: selectedHits.map((h) => ({
-          chunk_id: doc.chunks[h.index]?.chunk_id,
-          score: Number(h.score.toFixed(4))
-        })),
-        intent
-      }
-    });
+    const compiled = getCompiledRagGraph();
+    const out = await runRagGraph(
+      compiled,
+      {
+        scope: "document",
+        documentId: doc.id,
+        question,
+        history,
+        model,
+        temperature,
+        topK: effectiveTop,
+        allowed: { doc }
+      },
+      { checkpointNs: "doc" }
+    );
+
+    if (out && out.result) {
+      return res.json({
+        result: out.result,
+        cached: false,
+        degraded: Boolean(out.degraded),
+        retrieval: out.retrievalMeta || { hit_count: 0, min_score: RAG_MIN_SIMILARITY, scores: [] }
+      });
+    }
+    throw new Error("问答流程异常：缺少 result。");
   } catch (error) {
     const status = Number.isInteger(error.status) ? error.status : 500;
     return res.status(status).json({ error: error.message, error_code: "QUERY_FAILED" });
@@ -2087,202 +2353,38 @@ app.post("/api/library/query", documentQueryLimiter, async (req, res) => {
       });
     }
 
-    const requestedTop = Number(req.body?.top_k);
-    const effectiveTop = Number.isFinite(requestedTop)
-      ? Math.min(24, Math.max(1, Math.floor(requestedTop)))
-      : RAG_TOP_K;
-    const intent = inferQuestionIntent(question);
-    const questionKeywords = Array.from(new Set([...buildQuestionKeywords(question), ...intentKeywords(intent)]));
-    const expandedQuestions = buildExpandedQuestions(question, intent);
-
-    const qVectors = await embedTextsBatch(expandedQuestions);
-    if (!qVectors || qVectors.length === 0) {
-      return res.status(500).json({ error: "问题向量化失败。", error_code: "EMBED_QUERY_FAILED" });
-    }
-    const qVec = qVectors[0];
-
-    const collectHits = (threshold) => {
-      const merged = [];
-      for (const doc of queryableDocs) {
-        const seen = new Set();
-        for (const vec of qVectors) {
-          const docHits = rag.topKIndices(vec, doc.embeddings, effectiveTop, threshold);
-          for (const h of docHits) {
-            if (seen.has(h.index)) continue;
-            seen.add(h.index);
-            const chunk = doc.chunks[h.index];
-            if (!chunk) continue;
-            merged.push({
-              doc,
-              chunk,
-              score: h.score,
-              ref_id: `${doc.id}::${chunk.chunk_id}`
-            });
-          }
-        }
-      }
-      merged.sort((a, b) => b.score - a.score);
-      return merged.slice(0, effectiveTop);
-    };
-    const collectKeywordHits = () => {
-      const merged = [];
-      for (const doc of queryableDocs) {
-        const docHits = keywordSearchDocChunks(doc, questionKeywords, effectiveTop);
-        for (const h of docHits) {
-          const chunk = doc.chunks[h.index];
-          if (!chunk) continue;
-          merged.push({
-            doc,
-            chunk,
-            score: Math.min(0.25, 0.05 + h.score * 0.03),
-            ref_id: `${doc.id}::${chunk.chunk_id}`
-          });
-        }
-      }
-      merged.sort((a, b) => b.score - a.score);
-      return merged.slice(0, effectiveTop);
-    };
-    const collectRuleHits = () => {
-      const merged = [];
-      for (const doc of queryableDocs) {
-        const docHits = dataSourceRuleHitsForDoc(doc, effectiveTop);
-        for (const h of docHits) {
-          const chunk = doc.chunks[h.index];
-          if (!chunk) continue;
-          merged.push({
-            doc,
-            chunk,
-            score: Math.min(0.28, 0.08 + h.score * 0.025),
-            ref_id: `${doc.id}::${chunk.chunk_id}`
-          });
-        }
-      }
-      merged.sort((a, b) => b.score - a.score);
-      return merged.slice(0, effectiveTop);
-    };
-    const collectFindingsRuleHits = () => {
-      const merged = [];
-      for (const doc of queryableDocs) {
-        const docHits = findingsRuleHitsForDoc(doc, effectiveTop);
-        for (const h of docHits) {
-          const chunk = doc.chunks[h.index];
-          if (!chunk) continue;
-          merged.push({
-            doc,
-            chunk,
-            score: Math.min(0.28, 0.08 + h.score * 0.025),
-            ref_id: `${doc.id}::${chunk.chunk_id}`
-          });
-        }
-      }
-      merged.sort((a, b) => b.score - a.score);
-      return merged.slice(0, effectiveTop);
-    };
-
-    let selected = collectHits(RAG_MIN_SIMILARITY);
-    let usedRelaxedRetrieval = false;
-    if (selected.length === 0) {
-      const relaxedThreshold = looksLikeBroadSummaryQuestion(question)
-        ? Math.min(RAG_RELAXED_MIN_SIMILARITY, RAG_MIN_SIMILARITY)
-        : Math.min(0.12, RAG_MIN_SIMILARITY);
-      const relaxed = collectHits(relaxedThreshold);
-      if (relaxed.length > 0) {
-        selected = relaxed;
-        usedRelaxedRetrieval = true;
-      }
-    }
-
-    const keywordHits = collectKeywordHits();
-    if (keywordHits.length > 0) {
-      const seen = new Set(selected.map((r) => r.ref_id));
-      for (const row of keywordHits) {
-        if (!seen.has(row.ref_id)) {
-          selected.push(row);
-          seen.add(row.ref_id);
-        }
-      }
-      selected.sort((a, b) => b.score - a.score);
-      selected = selected.slice(0, effectiveTop);
-    }
-    if (isDataSourceIntent(intent, question)) {
-      const ruleHits = collectRuleHits();
-      if (ruleHits.length > 0) {
-        const seen = new Set(selected.map((r) => r.ref_id));
-        for (const row of ruleHits) {
-          if (!seen.has(row.ref_id)) {
-            selected.push(row);
-            seen.add(row.ref_id);
-          }
-        }
-        selected.sort((a, b) => b.score - a.score);
-        selected = selected.slice(0, effectiveTop);
-      }
-    }
-    if (intent === "findings") {
-      const ruleHits = collectFindingsRuleHits();
-      if (ruleHits.length > 0) {
-        const seen = new Set(selected.map((r) => r.ref_id));
-        for (const row of ruleHits) {
-          if (!seen.has(row.ref_id)) {
-            selected.push(row);
-            seen.add(row.ref_id);
-          }
-        }
-        selected.sort((a, b) => b.score - a.score);
-        selected = selected.slice(0, effectiveTop);
-      }
-    }
-
-    if (selected.length === 0) {
-      return res.json({
-        result: {
-          answer: "文献库中未检索到足够相关片段，暂无法可靠回答。建议问题更具体（方法名、实验设置、数据集等）。",
-          citations: [],
-          confidence: "N/A",
-          out_of_scope: false
-        },
-        degraded: true,
-        retrieval: { hit_count: 0, min_score: RAG_MIN_SIMILARITY, scores: [] }
-      });
-    }
-
-    for (const row of selected) {
-      await ensureDocDeepProfile(row.doc);
-    }
-    const refMap = new Map(selected.map((r) => [r.ref_id, r]));
     const model = String(req.body?.model || DEFAULT_MODEL).trim();
     const temperature = Number(req.body?.temperature);
     const clientHistory = sanitizeRagHistory(req.body?.history);
     const history = clientHistory.length > 0 ? clientHistory : sanitizeRagHistory(libraryChatHistory);
-    const messages = buildLibraryRagQueryMessages(question, selected, history);
-    const raw = await callChatCompletions(model, temperature, messages);
-    const parsed = sanitizeLibraryRagQueryResult(raw, refMap);
 
-    appendLibraryChatHistory(question, parsed.answer);
-    for (const c of parsed.citations) {
-      const doc = documents.get(c.document_id);
-      if (doc) {
-        appendDocChatHistory(doc, question, parsed.answer);
-      }
+    const requestedTop = Number(req.body?.top_k);
+    const effectiveTop = Number.isFinite(requestedTop)
+      ? Math.min(24, Math.max(1, Math.floor(requestedTop)))
+      : RAG_TOP_K;
+    const compiled = getCompiledRagGraph();
+    const out = await runRagGraph(
+      compiled,
+      {
+        scope: "library",
+        question,
+        history,
+        model,
+        temperature,
+        topK: effectiveTop
+      },
+      { checkpointNs: "library" }
+    );
+
+    if (out && out.result) {
+      return res.json({
+        result: out.result,
+        cached: false,
+        degraded: Boolean(out.degraded),
+        retrieval: out.retrievalMeta || { hit_count: 0, min_score: RAG_MIN_SIMILARITY, scores: [] }
+      });
     }
-
-    return res.json({
-      result: parsed,
-      cached: false,
-      degraded: usedRelaxedRetrieval,
-      retrieval: {
-        hit_count: selected.length,
-        min_score: RAG_MIN_SIMILARITY,
-        used_relaxed_threshold: usedRelaxedRetrieval,
-        relaxed_min_score: usedRelaxedRetrieval ? RAG_RELAXED_MIN_SIMILARITY : null,
-        scores: selected.map((h) => ({
-          ref_id: h.ref_id,
-          document_name: h.doc.fileName,
-          score: Number(h.score.toFixed(4))
-        })),
-        intent
-      }
-    });
+    throw new Error("问答流程异常：缺少 result。");
   } catch (error) {
     const status = Number.isInteger(error.status) ? error.status : 500;
     return res.status(status).json({ error: error.message, error_code: "LIBRARY_QUERY_FAILED" });
