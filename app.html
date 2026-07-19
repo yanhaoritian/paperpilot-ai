@@ -1,0 +1,133 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>工作台 · PaperPilot</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,500;9..144,700&family=Source+Sans+3:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="styles.css?v=20260720b">
+</head>
+<body class="page-app">
+  <div class="app-layout">
+    <header class="app-topbar">
+      <div class="brand brand--compact">
+        <span class="brand-mark" aria-hidden="true">P</span>
+        <div>
+          <p class="brand-title">PaperPilot</p>
+          <p class="brand-subtitle">个人知识库</p>
+        </div>
+      </div>
+
+      <div class="topbar-stats" aria-label="运行状态">
+        <span class="stat-pill"><i>服务</i><strong id="healthLibraryState">…</strong></span>
+        <span class="stat-pill"><i>模型</i><strong id="healthModelName">—</strong></span>
+        <span class="stat-pill"><i>命中</i><strong id="healthRetrievalHit">0</strong></span>
+        <span class="stat-pill"><i>路径</i><strong id="healthResponsePath">—</strong></span>
+      </div>
+
+      <div class="topbar-user">
+        <span class="user-chip" id="authUserLabel">用户</span>
+        <button type="button" class="btn btn-ghost" id="logoutBtn">退出</button>
+      </div>
+    </header>
+
+    <div class="app-body">
+      <!-- Left: libraries -->
+      <aside class="rail rail--left reveal" aria-label="知识库">
+        <div class="rail-head">
+          <h2>知识库</h2>
+          <p>私有 · 可多建</p>
+        </div>
+
+        <div class="create-row">
+          <input id="newLibraryName" type="text" placeholder="新库名称" aria-label="新知识库名称">
+          <button type="button" class="btn btn-primary btn-sm" id="createLibraryBtn">创建</button>
+        </div>
+
+        <ul id="libraryList" class="lib-list"></ul>
+
+        <div class="rail-actions">
+          <button type="button" class="btn btn-ghost btn-sm" id="renameLibraryBtn">重命名</button>
+          <button type="button" class="btn btn-ghost btn-sm btn-danger" id="deleteLibraryBtn">删除</button>
+        </div>
+        <p class="hint" id="activeLibraryHint">选择一个库以上传论文。</p>
+
+        <div class="rail-block">
+          <h3>问答检索范围</h3>
+          <p class="hint">可多选，决定对话检索哪些库</p>
+          <div id="queryLibraryChecks" class="check-stack"></div>
+        </div>
+      </aside>
+
+      <!-- Center: chat as primary -->
+      <section class="chat-stage reveal" aria-label="知识库对话" id="chatDock">
+        <div class="chat-stage__head">
+          <div>
+            <h2>文献对话</h2>
+            <p id="chatDockDocLabel">请先勾选左侧知识库</p>
+          </div>
+          <div class="chat-head-actions">
+            <select id="conversationSelect" class="conv-select" aria-label="历史会话"></select>
+            <button type="button" class="btn btn-ghost btn-sm" id="newConversationBtn">新对话</button>
+            <button type="button" class="btn btn-ghost btn-sm" id="ragClearChatBtn">新开并清空</button>
+          </div>
+        </div>
+
+        <div class="chat-stage__messages" id="ragChatMessages" role="log" aria-live="polite">
+          <div class="chat-empty" id="chatEmpty">
+            <p class="chat-empty__title">从一篇论文问起</p>
+            <p>勾选知识库后，试试：「这篇工作的主要贡献是什么？」</p>
+          </div>
+        </div>
+
+        <div class="chat-stage__composer">
+          <textarea
+            id="ragQuestion"
+            rows="3"
+            placeholder="基于所选知识库提问… Enter 发送，Shift+Enter 换行"
+          ></textarea>
+          <div class="composer-bar">
+            <label class="model-inline">
+              <span>模型</span>
+              <input id="modelSelect" type="text" value="deepseek-v4-flash" list="modelHints">
+              <datalist id="modelHints">
+                <option value="deepseek-v4-flash"></option>
+                <option value="deepseek-v4-pro"></option>
+              </datalist>
+            </label>
+            <button type="button" class="btn btn-primary" id="ragQueryBtn" disabled>发送</button>
+          </div>
+        </div>
+      </section>
+
+      <!-- Right: upload & docs -->
+      <aside class="rail rail--right reveal" aria-label="文献管理">
+        <div class="rail-head">
+          <h2>文献入库</h2>
+          <p>上传到当前选中库</p>
+        </div>
+
+        <label class="file-drop" for="pdfFile" id="fileDrop">
+          <input id="pdfFile" type="file" accept="application/pdf">
+          <span class="file-drop__title" id="fileDropTitle">选择或拖入 PDF</span>
+          <span class="file-drop__meta" id="pdfSizeHint">建议 ≤ 32 MB；扫描版将自动 OCR</span>
+          <span class="file-drop__selected" id="fileSelected" hidden></span>
+        </label>
+
+        <button type="button" class="btn btn-primary btn-block" id="uploadBtn">上传并索引</button>
+        <p class="hint hint--status" id="docStatusLine">尚未上传。</p>
+        <p class="status-line" id="statusLine" role="status">就绪</p>
+
+        <div class="rail-block">
+          <h3>当前库文档</h3>
+          <ul id="documentList" class="doc-list"></ul>
+        </div>
+      </aside>
+    </div>
+  </div>
+
+  <script src="app.js?v=20260720b"></script>
+</body>
+</html>

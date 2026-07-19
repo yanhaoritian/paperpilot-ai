@@ -1,0 +1,64 @@
+services:
+  db:
+    # DaoCloud mirror tag preferred when Docker Hub is slow in CN;
+    # local tag pgvector/pgvector:pg16 also works after: docker tag docker.m.daocloud.io/pgvector/pgvector:pg16 pgvector/pgvector:pg16
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_USER: paperpilot
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-paperpilot}
+      POSTGRES_DB: paperpilot
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U paperpilot -d paperpilot"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  api:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    ports:
+      - "8787:8787"
+    env_file:
+      - .env
+    environment:
+      # Lab default: Postgres + pgvector (overrides local sqlite in .env)
+      DATABASE_URL: postgresql+psycopg2://paperpilot:${POSTGRES_PASSWORD:-paperpilot}@db:5432/paperpilot
+      JWT_SECRET: ${JWT_SECRET:?Set_JWT_SECRET_in_dot_env}
+      JWT_REQUIRE_STRONG: ${JWT_REQUIRE_STRONG:-1}
+      AUTH_EXPOSE_CODE: ${AUTH_EXPOSE_CODE:-0}
+      AUTH_ALLOW_PHONE_REGISTER: ${AUTH_ALLOW_PHONE_REGISTER:-0}
+      INDEX_RECOVER_ON_STARTUP: ${INDEX_RECOVER_ON_STARTUP:-1}
+      PDF_STORAGE_DIR: /app/data/pdfs
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      OPENAI_BASE_URL: ${OPENAI_BASE_URL:-https://api.openai.com/v1}
+      DEFAULT_MODEL: ${DEFAULT_MODEL:-gpt-4.1-mini}
+      EMBEDDING_PROVIDER: ${EMBEDDING_PROVIDER:-api}
+      EMBEDDING_API_KEY: ${EMBEDDING_API_KEY:-}
+      EMBEDDING_BASE_URL: ${EMBEDDING_BASE_URL:-}
+      EMBEDDING_MODEL: ${EMBEDDING_MODEL:-text-embedding-3-small}
+      EMBEDDING_DIMENSIONS: ${EMBEDDING_DIMENSIONS:-1536}
+      SMTP_HOST: ${SMTP_HOST:-}
+      SMTP_PORT: ${SMTP_PORT:-587}
+      SMTP_USER: ${SMTP_USER:-}
+      SMTP_PASSWORD: ${SMTP_PASSWORD:-}
+      SMTP_FROM: ${SMTP_FROM:-}
+      SMTP_USE_TLS: ${SMTP_USE_TLS:-1}
+    volumes:
+      - ./data/pdfs:/app/data/pdfs
+      - ./index.html:/app/index.html:ro
+      - ./login.html:/app/login.html:ro
+      - ./app.html:/app/app.html:ro
+      - ./auth.js:/app/auth.js:ro
+      - ./app.js:/app/app.js:ro
+      - ./styles.css:/app/styles.css:ro
+    depends_on:
+      db:
+        condition: service_healthy
+
+volumes:
+  pgdata:

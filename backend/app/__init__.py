@@ -1,0 +1,1 @@
+"""PaperPilot lab RAG backend."""

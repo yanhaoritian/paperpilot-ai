@@ -2,3 +2,15 @@
 node_modules
 npm-debug.log*
 data/
+backups/
+backend/.venv/
+backend/**/__pycache__/
+backend/.pytest_cache/
+.pytest_cache/
+backend/tests/_test_pdfs/
+backend/tests/_test*.db
+*.pyc
+.DS_Store
+
+backend/_pytest_tmp.db
+*.db

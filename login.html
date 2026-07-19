@@ -1,0 +1,82 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>登录 · PaperPilot</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,500;9..144,700&family=Source+Sans+3:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body class="page-auth">
+  <div class="auth-shell">
+    <aside class="auth-brand">
+      <div class="auth-brand__glow"></div>
+      <p class="auth-kicker">PaperPilot</p>
+      <h1 class="auth-headline">把论文收进<br>你的私人书房。</h1>
+      <p class="auth-lead">多知识库 · 选库检索 · 原文引用。为实验室个人阅读而设计。</p>
+      <ul class="auth-points">
+        <li>账号私有，库互不可见</li>
+        <li>一篇上传，多轮追问</li>
+        <li>答案带着页码与摘录</li>
+      </ul>
+    </aside>
+
+    <main class="auth-panel">
+      <div class="auth-card reveal" data-mode="login">
+        <div class="auth-tabs" role="tablist" aria-label="登录或注册">
+          <button type="button" class="auth-tab is-active" role="tab" aria-selected="true" data-mode="login">登录</button>
+          <button type="button" class="auth-tab" role="tab" aria-selected="false" data-mode="register">注册</button>
+        </div>
+
+        <!-- 登录 -->
+        <form id="loginForm" class="auth-form auth-form--login" autocomplete="on">
+          <p class="auth-form-lead">使用注册邮箱登录（也支持用户名）</p>
+          <label class="field">
+            <span>邮箱或用户名</span>
+            <input id="loginAccount" type="text" required autocomplete="username" placeholder="name@lab.edu">
+          </label>
+          <label class="field">
+            <span>密码</span>
+            <input id="loginPassword" type="password" required autocomplete="current-password" placeholder="••••••••">
+          </label>
+          <button class="btn btn-primary btn-block" type="submit">进入书房</button>
+        </form>
+
+        <!-- 注册（一期：邮箱验证码） -->
+        <form id="registerForm" class="auth-form auth-form--register" hidden autocomplete="on">
+          <p class="auth-form-lead">创建账号：用户名 + 邮箱验证码（短信通道二期再开）</p>
+
+          <label class="field">
+            <span>用户名</span>
+            <input id="regUsername" type="text" required minlength="3" maxlength="64" autocomplete="nickname" placeholder="实验室内显示的名字">
+          </label>
+
+          <label class="field field--contact is-active" id="regEmailWrap" data-contact="email">
+            <span>邮箱</span>
+            <input id="regEmail" type="email" required autocomplete="email" placeholder="you@lab.edu">
+          </label>
+
+          <label class="field">
+            <span>验证码</span>
+            <input id="regCode" type="text" inputmode="numeric" required maxlength="8" placeholder="6 位验证码" autocomplete="one-time-code">
+          </label>
+          <button type="button" class="btn btn-ghost btn-block btn-code" id="sendCodeBtn">获取验证码</button>
+
+          <label class="field">
+            <span>设置密码</span>
+            <input id="regPassword" type="password" required minlength="6" autocomplete="new-password" placeholder="至少 6 位">
+          </label>
+
+          <button class="btn btn-primary btn-block" type="submit">完成注册并进入</button>
+          <p class="hint" id="codeHint"></p>
+        </form>
+
+        <p class="auth-status" id="authStatus" role="status"></p>
+      </div>
+    </main>
+  </div>
+  <script src="auth.js"></script>
+</body>
+</html>

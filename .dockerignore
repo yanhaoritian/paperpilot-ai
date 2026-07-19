@@ -1,6 +1,9 @@
-node_modules
 .git
 .env
 *.log
-npm-debug.log*
 .DS_Store
+backend/.venv
+backend/**/__pycache__
+backend/.pytest_cache
+data
+node_modules

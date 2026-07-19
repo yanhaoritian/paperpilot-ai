@@ -1,0 +1,32 @@
+[
+  {
+    "id": "alpha_inhibitor",
+    "question": "What is the effect of alpha-kinase inhibitor AK-17 on phosphorylation?",
+    "library_key": "eval_lib",
+    "expect_doc_names": ["alpha_kinase.pdf"]
+  },
+  {
+    "id": "alpha_methods",
+    "question": "Which methods were used in the alpha-kinase study on murine samples?",
+    "library_key": "eval_lib",
+    "expect_doc_names": ["alpha_kinase.pdf"]
+  },
+  {
+    "id": "beta_conversion",
+    "question": "What conversion rate did beta-catalyst BC-9 achieve and in how long?",
+    "library_key": "eval_lib",
+    "expect_doc_names": ["beta_catalyst.pdf"]
+  },
+  {
+    "id": "beta_applications",
+    "question": "What applications does the beta-catalyst review mention for green chemistry?",
+    "library_key": "eval_lib",
+    "expect_doc_names": ["beta_catalyst.pdf"]
+  },
+  {
+    "id": "alpha_pathway",
+    "question": "How does the alpha-kinase pathway relate to muscle cell phosphorylation?",
+    "library_key": "eval_lib",
+    "expect_doc_names": ["alpha_kinase.pdf"]
+  }
+]
