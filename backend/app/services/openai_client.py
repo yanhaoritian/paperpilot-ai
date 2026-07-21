@@ -4,7 +4,9 @@ import hashlib
 import json
 import logging
 import math
+import threading
 import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any
 
 import httpx
@@ -12,6 +14,32 @@ import httpx
 from app.config import get_settings
 
 logger = logging.getLogger(__name__)
+
+_client_lock = threading.Lock()
+_chat_client: httpx.Client | None = None
+_embed_client: httpx.Client | None = None
+
+
+def _get_chat_client() -> httpx.Client:
+    global _chat_client
+    with _client_lock:
+        if _chat_client is None or _chat_client.is_closed:
+            _chat_client = httpx.Client(
+                timeout=180.0,
+                limits=httpx.Limits(max_connections=20, max_keepalive_connections=10),
+            )
+        return _chat_client
+
+
+def _get_embed_client() -> httpx.Client:
+    global _embed_client
+    with _client_lock:
+        if _embed_client is None or _embed_client.is_closed:
+            _embed_client = httpx.Client(
+                timeout=120.0,
+                limits=httpx.Limits(max_connections=20, max_keepalive_connections=10),
+            )
+        return _embed_client
 
 
 def _chat_headers() -> dict[str, str]:
@@ -62,6 +90,47 @@ def _local_embed(text: str, dim: int) -> list[float]:
     return [v / norm for v in vec]
 
 
+def _embed_one_batch(batch_index: int, chunk: list[str]) -> tuple[int, list[list[float]]]:
+    settings = get_settings()
+    url = f"{_embed_base_url()}/embeddings"
+    retries = max(1, settings.embedding_retries)
+    client = _get_embed_client()
+    last_exc: Exception | None = None
+    for attempt in range(1, retries + 1):
+        try:
+            payload: dict[str, Any] = {
+                "model": settings.embedding_model,
+                "input": chunk,
+            }
+            if settings.embedding_dimensions and "embedding-3" in settings.embedding_model:
+                payload["dimensions"] = settings.embedding_dimensions
+            resp = client.post(url, headers=_embed_headers(), json=payload)
+            if resp.status_code in {502, 503, 504} and attempt < retries:
+                logger.warning(
+                    "embedding %s on attempt %s/%s (batch %s), retrying…",
+                    resp.status_code,
+                    attempt,
+                    retries,
+                    batch_index,
+                )
+                time.sleep(1.5 * attempt)
+                continue
+            if resp.status_code >= 400:
+                detail = resp.text[:300]
+                logger.error("embedding failed: %s %s", resp.status_code, detail)
+                raise RuntimeError(f"Embeddings HTTP {resp.status_code}: {detail}")
+            data = resp.json()["data"]
+            data_sorted = sorted(data, key=lambda x: x["index"])
+            return batch_index, [row["embedding"] for row in data_sorted]
+        except httpx.HTTPError as exc:
+            last_exc = exc
+            if attempt < retries:
+                time.sleep(1.5 * attempt)
+                continue
+            raise RuntimeError(f"Embeddings 请求失败: {exc}") from exc
+    raise RuntimeError(f"Embeddings 请求失败: {last_exc}")
+
+
 def embed_texts(texts: list[str]) -> list[list[float]]:
     if not texts:
         return []
@@ -70,52 +139,26 @@ def embed_texts(texts: list[str]) -> list[list[float]]:
     if provider == "local":
         return [_local_embed(t, settings.embedding_dimensions) for t in texts]
 
-    url = f"{_embed_base_url()}/embeddings"
-    vectors: list[list[float]] = []
     batch = max(1, min(settings.embed_batch_size, 64))
-    retries = max(1, settings.embedding_retries)
+    batches = [texts[i : i + batch] for i in range(0, len(texts), batch)]
+    if len(batches) == 1:
+        _, vectors = _embed_one_batch(0, batches[0])
+        return vectors
 
-    with httpx.Client(timeout=120.0) as client:
-        for i in range(0, len(texts), batch):
-            chunk = texts[i : i + batch]
-            last_exc: Exception | None = None
-            for attempt in range(1, retries + 1):
-                try:
-                    payload: dict[str, Any] = {
-                        "model": settings.embedding_model,
-                        "input": chunk,
-                    }
-                    # Zhipu embedding-3 supports custom dimensions
-                    if settings.embedding_dimensions and "embedding-3" in settings.embedding_model:
-                        payload["dimensions"] = settings.embedding_dimensions
-                    resp = client.post(url, headers=_embed_headers(), json=payload)
-                    if resp.status_code in {502, 503, 504} and attempt < retries:
-                        logger.warning(
-                            "embedding %s on attempt %s/%s, retrying…",
-                            resp.status_code,
-                            attempt,
-                            retries,
-                        )
-                        time.sleep(1.5 * attempt)
-                        continue
-                    if resp.status_code >= 400:
-                        detail = resp.text[:300]
-                        logger.error("embedding failed: %s %s", resp.status_code, detail)
-                        raise RuntimeError(f"Embeddings HTTP {resp.status_code}: {detail}")
-                    data = resp.json()["data"]
-                    data_sorted = sorted(data, key=lambda x: x["index"])
-                    vectors.extend([row["embedding"] for row in data_sorted])
-                    last_exc = None
-                    break
-                except httpx.HTTPError as exc:
-                    last_exc = exc
-                    if attempt < retries:
-                        time.sleep(1.5 * attempt)
-                        continue
-                    raise RuntimeError(f"Embeddings 请求失败: {exc}") from exc
-            if last_exc:
-                raise RuntimeError(f"Embeddings 请求失败: {last_exc}") from last_exc
-    return vectors
+    workers = max(1, min(len(batches), int(settings.embed_concurrency or 3)))
+    ordered: list[list[list[float]] | None] = [None] * len(batches)
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        futures = [pool.submit(_embed_one_batch, i, chunk) for i, chunk in enumerate(batches)]
+        for fut in as_completed(futures):
+            idx, vectors = fut.result()
+            ordered[idx] = vectors
+
+    out: list[list[float]] = []
+    for part in ordered:
+        if part is None:
+            raise RuntimeError("Embeddings batch missing")
+        out.extend(part)
+    return out
 
 
 def chat_json(
@@ -132,12 +175,12 @@ def chat_json(
         "messages": messages,
         "response_format": {"type": "json_object"},
     }
-    with httpx.Client(timeout=180.0) as client:
-        resp = client.post(url, headers=_chat_headers(), json=payload)
-        if resp.status_code >= 400:
-            logger.error("chat failed: %s %s", resp.status_code, resp.text[:500])
-            resp.raise_for_status()
-        content = resp.json()["choices"][0]["message"]["content"]
+    client = _get_chat_client()
+    resp = client.post(url, headers=_chat_headers(), json=payload)
+    if resp.status_code >= 400:
+        logger.error("chat failed: %s %s", resp.status_code, resp.text[:500])
+        resp.raise_for_status()
+    content = resp.json()["choices"][0]["message"]["content"]
     try:
         return json.loads(content)
     except json.JSONDecodeError:
@@ -163,29 +206,29 @@ def chat_stream(
         "messages": messages,
         "stream": True,
     }
-    with httpx.Client(timeout=180.0) as client:
-        with client.stream("POST", url, headers=_chat_headers(), json=payload) as resp:
-            if resp.status_code >= 400:
-                body = resp.read().decode("utf-8", errors="replace")[:500]
-                logger.error("chat stream failed: %s %s", resp.status_code, body)
-                raise RuntimeError(f"Chat stream HTTP {resp.status_code}: {body}")
-            for line in resp.iter_lines():
-                if not line:
-                    continue
-                if line.startswith("data:"):
-                    data = line[5:].strip()
-                else:
-                    continue
-                if data == "[DONE]":
-                    break
-                try:
-                    chunk = json.loads(data)
-                except json.JSONDecodeError:
-                    continue
-                choices = chunk.get("choices") or []
-                if not choices:
-                    continue
-                delta = choices[0].get("delta") or {}
-                text = delta.get("content")
-                if text:
-                    yield text
+    client = _get_chat_client()
+    with client.stream("POST", url, headers=_chat_headers(), json=payload) as resp:
+        if resp.status_code >= 400:
+            body = resp.read().decode("utf-8", errors="replace")[:500]
+            logger.error("chat stream failed: %s %s", resp.status_code, body)
+            raise RuntimeError(f"Chat stream HTTP {resp.status_code}: {body}")
+        for line in resp.iter_lines():
+            if not line:
+                continue
+            if line.startswith("data:"):
+                data = line[5:].strip()
+            else:
+                continue
+            if data == "[DONE]":
+                break
+            try:
+                chunk = json.loads(data)
+            except json.JSONDecodeError:
+                continue
+            choices = chunk.get("choices") or []
+            if not choices:
+                continue
+            delta = choices[0].get("delta") or {}
+            text = delta.get("content")
+            if text:
+                yield text

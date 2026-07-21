@@ -98,22 +98,44 @@ def _ensure_pgvector_indexes() -> None:
     """Create ANN index for embedding search (Postgres only)."""
     if settings.is_sqlite:
         return
+    import logging
+
+    logger = logging.getLogger(__name__)
     with engine.begin() as conn:
-        conn.execute(
-            text(
-                """
-                CREATE INDEX IF NOT EXISTS ix_chunks_embedding_hnsw
-                ON chunks
-                USING hnsw (embedding vector_cosine_ops)
-                WITH (m = 16, ef_construction = 64)
-                """
-            )
-        )
         conn.execute(
             text(
                 "CREATE INDEX IF NOT EXISTS ix_chunks_owner_library ON chunks (owner_id, library_id)"
             )
         )
+        # Prefer HNSW for cosine search; fall back to IVFFlat if HNSW unavailable.
+        try:
+            conn.execute(
+                text(
+                    """
+                    CREATE INDEX IF NOT EXISTS ix_chunks_embedding_hnsw
+                    ON chunks
+                    USING hnsw (embedding vector_cosine_ops)
+                    WITH (m = 16, ef_construction = 64)
+                    """
+                )
+            )
+            logger.info("pgvector index ready: ix_chunks_embedding_hnsw")
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("HNSW index unavailable (%s); trying IVFFlat", exc)
+            try:
+                conn.execute(
+                    text(
+                        """
+                        CREATE INDEX IF NOT EXISTS ix_chunks_embedding_ivfflat
+                        ON chunks
+                        USING ivfflat (embedding vector_cosine_ops)
+                        WITH (lists = 100)
+                        """
+                    )
+                )
+                logger.info("pgvector index ready: ix_chunks_embedding_ivfflat")
+            except Exception as exc2:  # noqa: BLE001
+                logger.warning("pgvector ANN index skipped: %s", exc2)
 
 
 def _migrate_users_columns() -> None:

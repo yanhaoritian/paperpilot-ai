@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from sqlalchemy import select
+from sqlalchemy import select, text
 from sqlalchemy.orm import Session
 
 from app.config import get_settings
@@ -66,6 +66,11 @@ class PgVectorStore:
             return scored[:top_n]
 
         distance = Chunk.embedding.cosine_distance(query_vector)
+        # Raise recall for HNSW when available (no-op if GUC unsupported).
+        try:
+            db.execute(text("SET LOCAL hnsw.ef_search = 64"))
+        except Exception:  # noqa: BLE001
+            pass
         stmt = (
             select(Chunk, Document.file_name, distance.label("distance"))
             .join(Document, Document.id == Chunk.document_id)

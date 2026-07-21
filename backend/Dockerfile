@@ -8,7 +8,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 COPY backend/requirements.txt /app/backend/requirements.txt
-RUN pip install --no-cache-dir -r /app/backend/requirements.txt
+# CN-friendly PyPI + ensure setuptools before packages that build from sdist (e.g. antlr4)
+RUN pip install --no-cache-dir -i https://mirrors.aliyun.com/pypi/simple/ --trusted-host mirrors.aliyun.com \
+    -U pip setuptools wheel \
+ && pip install --no-cache-dir -i https://mirrors.aliyun.com/pypi/simple/ --trusted-host mirrors.aliyun.com \
+    -r /app/backend/requirements.txt
 
 COPY backend /app/backend
 COPY index.html login.html app.html auth.js app.js styles.css /app/

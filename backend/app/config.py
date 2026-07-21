@@ -44,8 +44,15 @@ class Settings(BaseSettings):
     chunk_overlap_ratio: float = 0.15
     max_chunks: int = 280
     embed_batch_size: int = 64
+    # Concurrent embedding HTTP batches (1 = serial)
+    embed_concurrency: int = 3
+    # Concurrent LLM contextual-prefix enrichments during indexing
+    contextual_prefix_concurrency: int = 8
     rag_top_k: int = 6
     rag_min_similarity: float = 0.22
+
+    # Identical query answer cache (ms). 0 = disabled.
+    response_cache_ttl_ms: int = 600_000
 
     rate_limit_window_seconds: int = 900
     rate_limit_auth_max: int = 30

@@ -1,8 +1,13 @@
 from __future__ import annotations
 
+import logging
+from concurrent.futures import ThreadPoolExecutor, as_completed
+
 from app.config import get_settings
 from app.services.chunking import clamp
 from app.services.structure import StructuredBlock
+
+logger = logging.getLogger(__name__)
 
 
 def chunks_from_blocks(
@@ -100,6 +105,32 @@ def rule_context_prefix(*, file_name: str, section_path: str, page_start: int | 
     return f"《{file_name}》§{sec} {page}（{role}）："
 
 
+def _llm_prefix_for_chunk(file_name: str, chunk: dict) -> str | None:
+    from app.services.openai_client import chat_json
+
+    prompt = [
+        {
+            "role": "system",
+            "content": (
+                "为检索片段写一句中文上下文前缀（文档+章节+本段作用），不超过40字。"
+                '只输出JSON: {"prefix":"..."}'
+            ),
+        },
+        {
+            "role": "user",
+            "content": (
+                f"文件:{file_name}\n章节:{chunk.get('section_path')}\n页:{chunk.get('page_start')}\n"
+                f"角色:{chunk.get('role')}\n片段:{chunk.get('text', '')[:400]}"
+            ),
+        },
+    ]
+    raw = chat_json(prompt, temperature=0.1)
+    pref = str(raw.get("prefix") or "").strip()
+    if not pref:
+        return None
+    return pref if pref.endswith("：") or pref.endswith(":") else pref + "："
+
+
 def build_contextual_prefixes(
     chunks: list[dict],
     *,
@@ -120,31 +151,24 @@ def build_contextual_prefixes(
         )
     if not use_llm or not settings.contextual_chunk_enabled:
         return prefixes
-    # Optional LLM enrichment for a sample; keep rule prefix as base to bound cost
-    try:
-        from app.services.openai_client import chat_json
 
-        # Only enrich first N to control cost
-        n = min(8, len(chunks))
-        for i in range(n):
-            c = chunks[i]
-            prompt = [
-                {
-                    "role": "system",
-                    "content": "为检索片段写一句中文上下文前缀（文档+章节+本段作用），不超过40字。只输出JSON: {\"prefix\":\"...\"}",
-                },
-                {
-                    "role": "user",
-                    "content": (
-                        f"文件:{file_name}\n章节:{c.get('section_path')}\n页:{c.get('page_start')}\n"
-                        f"角色:{c.get('role')}\n片段:{c.get('text','')[:400]}"
-                    ),
-                },
-            ]
-            raw = chat_json(prompt, temperature=0.1)
-            pref = str(raw.get("prefix") or "").strip()
+    # Enrich first N chunks concurrently (same quality, much lower wall time).
+    n = min(8, len(chunks))
+    if n <= 0:
+        return prefixes
+    workers = max(1, min(n, int(settings.contextual_prefix_concurrency or 8)))
+
+    def _job(i: int) -> tuple[int, str | None]:
+        try:
+            return i, _llm_prefix_for_chunk(file_name, chunks[i])
+        except Exception:  # noqa: BLE001
+            logger.exception("contextual prefix failed for chunk %s", i)
+            return i, None
+
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        futures = [pool.submit(_job, i) for i in range(n)]
+        for fut in as_completed(futures):
+            i, pref = fut.result()
             if pref:
-                prefixes[i] = pref if pref.endswith("：") or pref.endswith(":") else pref + "："
-    except Exception:
-        pass
+                prefixes[i] = pref
     return prefixes

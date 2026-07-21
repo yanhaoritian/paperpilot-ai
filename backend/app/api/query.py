@@ -4,6 +4,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app.config import get_settings
 from app.db import get_db
 from app.deps import get_current_user
 from app.models import Library, User
@@ -19,6 +20,7 @@ from app.services.intent import (
     list_library_documents,
 )
 from app.services.quotas import consume_query_quota
+from app.services.response_cache import make_query_cache_key, query_cache
 
 router = APIRouter(prefix="/api", tags=["query"])
 
@@ -58,11 +60,32 @@ def query_libraries(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="知识库不存在")
 
     question = body.question.strip()
-    consume_query_quota(db, user.id)
     intent = detect_intent(question)
+    settings = get_settings()
+    cache_key = make_query_cache_key(
+        owner_id=user.id,
+        library_ids=library_ids,
+        question=question,
+        model=body.model,
+        temperature=body.temperature,
+        intent=intent.value,
+    )
+    if settings.response_cache_ttl_ms > 0:
+        cached = query_cache().get(cache_key)
+        if isinstance(cached, dict):
+            return QueryResponse(**cached)
+
+    consume_query_quota(db, user.id)
 
     if intent == QueryIntent.CATALOG:
-        return _catalog_answer(db, owner_id=user.id, library_ids=library_ids)
+        result = _catalog_answer(db, owner_id=user.id, library_ids=library_ids)
+        if settings.response_cache_ttl_ms > 0:
+            query_cache().set(
+                cache_key,
+                result.model_dump(),
+                ttl_ms=settings.response_cache_ttl_ms,
+            )
+        return result
 
     inventory = list_library_documents(db, owner_id=user.id, library_ids=library_ids)
     inventory_text = format_inventory_block(inventory)
@@ -90,4 +113,6 @@ def query_libraries(
             else None
         ),
     )
+    if settings.response_cache_ttl_ms > 0:
+        query_cache().set(cache_key, result, ttl_ms=settings.response_cache_ttl_ms)
     return QueryResponse(**result)

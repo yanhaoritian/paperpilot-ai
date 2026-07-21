@@ -23,6 +23,8 @@ from app.schemas import (
 )
 from app.services.pdf_tools import iter_agent_events
 from app.services.quotas import consume_query_quota
+from app.services.response_cache import make_query_cache_key, query_cache
+from app.services.intent import detect_intent
 
 router = APIRouter(prefix="/api/conversations", tags=["conversations"])
 
@@ -157,8 +159,6 @@ def post_message_stream(
     if not library_ids:
         raise HTTPException(status_code=400, detail="请至少选择一个知识库")
 
-    consume_query_quota(db, user.id)
-
     # Persist user + placeholder assistant quickly so SSE can start immediately
     user_msg = Message(conversation_id=conv.id, role="user", content=question)
     db.add(user_msg)
@@ -180,13 +180,33 @@ def post_message_stream(
         for m in reversed(history_rows)
         if m.role in {"user", "assistant"} and (m.content or "").strip()
     ]
+    # Cache only turn-0 questions (no prior history) — identical follow-ups differ by context.
+    cacheable = len(history) == 0 and settings.response_cache_ttl_ms > 0
+    cache_key = ""
+    cached_final: dict | None = None
+    if cacheable:
+        cache_key = make_query_cache_key(
+            owner_id=user.id,
+            library_ids=library_ids,
+            question=question,
+            model=body.model,
+            temperature=body.temperature,
+            intent=detect_intent(question).value,
+            history_fingerprint="",
+        )
+        hit = query_cache().get(cache_key)
+        if isinstance(hit, dict) and hit.get("answer"):
+            cached_final = hit
+
+    if cached_final is None:
+        consume_query_quota(db, user.id)
 
     assistant = Message(
         conversation_id=conv.id,
         role="assistant",
         content="",
         citations=None,
-        extra={"streaming": True},
+        extra={"streaming": True, "cache_hit": bool(cached_final)},
     )
     db.add(assistant)
     db.commit()
@@ -200,6 +220,7 @@ def post_message_stream(
     owner_id = str(user.id)
     model = body.model
     temperature = body.temperature
+    ttl_ms = int(settings.response_cache_ttl_ms or 0)
 
     def event_gen() -> Iterator[str]:
         yield _sse(
@@ -208,9 +229,9 @@ def post_message_stream(
                 "conversation_id": conv_id,
                 "message_id": assistant_id,
                 "user_message_id": user_msg_id,
+                "cache_hit": bool(cached_final),
             },
         )
-        work = SessionLocal()
         final_payload: dict = {
             "answer": "",
             "citations": [],
@@ -219,41 +240,72 @@ def post_message_stream(
             "confidence": "low",
         }
         parts: list[str] = []
-        try:
-            for event, data in iter_agent_events(
-                work,
-                owner_id=owner_id,
-                library_ids=library_ids,
-                question=question,
-                history=history,
-                model=model,
-                temperature=temperature,
-            ):
-                if event == "token":
-                    text = str(data.get("text") or "")
-                    parts.append(text)
-                    yield _sse("token", {"text": text})
-                elif event == "final":
-                    final_payload = data
-                elif event in {"status", "tool", "meta", "error"}:
-                    yield _sse(event, data)
-                else:
-                    yield _sse(event, data)
-        except Exception as exc:  # noqa: BLE001
-            err = f"生成失败：{exc}"
-            if not parts:
-                parts.append(err)
-                yield _sse("token", {"text": err})
-            yield _sse("error", {"detail": str(exc)[:300]})
+
+        if cached_final is not None:
+            answer = str(cached_final.get("answer") or "")
+            # Replay as coarse tokens so the UI still streams.
+            step = max(24, len(answer) // 40 or 24)
+            for i in range(0, len(answer), step):
+                piece = answer[i : i + step]
+                parts.append(piece)
+                yield _sse("token", {"text": piece})
             final_payload = {
-                "answer": "".join(parts),
-                "citations": [],
-                "retrieval_hit": 0,
-                "degraded": True,
-                "confidence": "low",
+                "answer": answer,
+                "citations": cached_final.get("citations") or [],
+                "retrieval_hit": int(cached_final.get("retrieval_hit") or 0),
+                "degraded": bool(cached_final.get("degraded")),
+                "confidence": cached_final.get("confidence") or "medium",
             }
-        finally:
-            work.close()
+        else:
+            work = SessionLocal()
+            try:
+                for event, data in iter_agent_events(
+                    work,
+                    owner_id=owner_id,
+                    library_ids=library_ids,
+                    question=question,
+                    history=history,
+                    model=model,
+                    temperature=temperature,
+                ):
+                    if event == "token":
+                        text = str(data.get("text") or "")
+                        parts.append(text)
+                        yield _sse("token", {"text": text})
+                    elif event == "final":
+                        final_payload = data
+                    elif event in {"status", "tool", "meta", "error"}:
+                        yield _sse(event, data)
+                    else:
+                        yield _sse(event, data)
+            except Exception as exc:  # noqa: BLE001
+                err = f"生成失败：{exc}"
+                if not parts:
+                    parts.append(err)
+                    yield _sse("token", {"text": err})
+                yield _sse("error", {"detail": str(exc)[:300]})
+                final_payload = {
+                    "answer": "".join(parts),
+                    "citations": [],
+                    "retrieval_hit": 0,
+                    "degraded": True,
+                    "confidence": "low",
+                }
+            finally:
+                work.close()
+
+            if cacheable and cache_key and not final_payload.get("degraded"):
+                query_cache().set(
+                    cache_key,
+                    {
+                        "answer": str(final_payload.get("answer") or "".join(parts)),
+                        "citations": final_payload.get("citations") or [],
+                        "retrieval_hit": int(final_payload.get("retrieval_hit") or 0),
+                        "degraded": bool(final_payload.get("degraded")),
+                        "confidence": final_payload.get("confidence") or "medium",
+                    },
+                    ttl_ms=ttl_ms,
+                )
 
         answer = str(final_payload.get("answer") or "".join(parts)).strip() or "无法从文献中得出可靠结论。"
         citations = final_payload.get("citations") or []
@@ -275,6 +327,7 @@ def post_message_stream(
                 "confidence": final_payload.get("confidence"),
                 "degraded": bool(final_payload.get("degraded")),
                 "retrieval_hit": int(final_payload.get("retrieval_hit") or 0),
+                "cache_hit": bool(cached_final),
             },
         )
         s = SessionLocal()
