@@ -3,9 +3,9 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <meta name="theme-color" content="#10231d">
+  <meta name="theme-color" content="#f4f5f9">
   <title>工作台 · PaperPilot</title>
-  <link rel="stylesheet" href="styles.css?v=20260731ui2">
+  <link rel="stylesheet" href="styles.css?v=20260731ui3">
 </head>
 <body class="page-app">
   <div class="app-layout">
@@ -16,12 +16,12 @@
         </span>
         <div>
           <p class="brand-title">PaperPilot</p>
-          <p class="brand-subtitle">Research intelligence</p>
+          <p class="brand-subtitle">Research workspace</p>
         </div>
       </div>
 
       <div class="topbar-context">
-        <span class="topbar-context__eyebrow">AI RESEARCH WORKSPACE</span>
+        <span class="topbar-context__eyebrow">PRIVATE RESEARCH WORKSPACE</span>
         <p class="status-line" id="statusLine" role="status">工作台已就绪</p>
       </div>
 
@@ -46,7 +46,7 @@
       <aside class="rail rail--left reveal" aria-label="知识库">
         <div class="rail-head rail-head--inverse">
           <div>
-            <span class="section-kicker">RESEARCH SPACES</span>
+            <span class="section-kicker">KNOWLEDGE LIBRARY</span>
             <h2>我的知识库</h2>
           </div>
           <span class="count-badge" id="libraryCount">0</span>
@@ -63,6 +63,35 @@
           <button type="button" class="btn btn-dark-ghost btn-sm" id="renameLibraryBtn">重命名</button>
           <button type="button" class="btn btn-dark-ghost btn-sm btn-danger-on-dark" id="deleteLibraryBtn">删除</button>
         </div>
+
+        <section class="library-source-panel" aria-label="当前知识库文献">
+          <div class="library-source-panel__head">
+            <div>
+              <span class="section-kicker">CURRENT LIBRARY</span>
+              <h3>库内论文</h3>
+            </div>
+            <span class="count-badge count-badge--paper" id="documentCount">0</span>
+          </div>
+
+          <p class="active-library-card" id="activeLibraryHint">选择一个知识库以上传论文。</p>
+
+          <div class="upload-panel upload-panel--compact">
+            <label class="file-drop" for="pdfFile" id="fileDrop">
+              <input id="pdfFile" type="file" accept="application/pdf">
+              <span class="file-drop__icon" aria-hidden="true">PDF</span>
+              <span class="file-drop__title" id="fileDropTitle">选择或拖入论文</span>
+              <span class="file-drop__meta" id="pdfSizeHint">单篇建议 ≤ 32 MB</span>
+              <span class="file-drop__selected" id="fileSelected" hidden></span>
+            </label>
+
+            <button type="button" class="btn btn-primary btn-block" id="uploadBtn">＋ 添加并索引</button>
+            <p class="hint hint--status" id="docStatusLine">尚未选择文件。</p>
+          </div>
+
+          <div class="rail-block document-block">
+            <ul id="documentList" class="doc-list"></ul>
+          </div>
+        </section>
 
         <div class="rail-block scope-block">
           <div class="rail-block__title">
@@ -154,48 +183,9 @@
         </div>
       </section>
 
-      <aside class="rail rail--right reveal" aria-label="文献管理">
-        <div class="rail-head">
-          <div>
-            <span class="section-kicker">SOURCE LIBRARY</span>
-            <h2>文献管理</h2>
-          </div>
-          <span class="count-badge count-badge--paper" id="documentCount">0</span>
-        </div>
-
-        <p class="active-library-card" id="activeLibraryHint">选择一个知识库以上传论文。</p>
-
-        <div class="upload-panel">
-          <div class="upload-panel__head">
-            <span>01</span>
-            <p><strong>添加论文</strong><small>系统将自动解析、OCR 与建立索引</small></p>
-          </div>
-
-          <label class="file-drop" for="pdfFile" id="fileDrop">
-            <input id="pdfFile" type="file" accept="application/pdf">
-            <span class="file-drop__icon" aria-hidden="true">PDF</span>
-            <span class="file-drop__title" id="fileDropTitle">选择或拖入 PDF</span>
-            <span class="file-drop__meta" id="pdfSizeHint">单篇建议 ≤ 32 MB</span>
-            <span class="file-drop__selected" id="fileSelected" hidden></span>
-          </label>
-
-          <button type="button" class="btn btn-primary btn-block" id="uploadBtn">上传并建立索引</button>
-          <p class="hint hint--status" id="docStatusLine">尚未选择文件。</p>
-        </div>
-
-        <div class="rail-block document-block">
-          <div class="rail-block__title">
-            <div>
-              <span class="section-kicker">INDEXED PAPERS</span>
-              <h3>当前库文档</h3>
-            </div>
-          </div>
-          <ul id="documentList" class="doc-list"></ul>
-        </div>
-      </aside>
     </div>
   </div>
 
-  <script src="app.js?v=20260731ui2"></script>
+  <script src="app.js?v=20260731ui3"></script>
 </body>
 </html>
