@@ -3,89 +3,129 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="theme-color" content="#10231d">
   <title>工作台 · PaperPilot</title>
-  <link rel="preconnect" href="https://fonts.googleapis.com">
-  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,500;9..144,700&family=Source+Sans+3:wght@400;500;600;700&display=swap" rel="stylesheet">
-  <link rel="stylesheet" href="styles.css?v=20260731m1">
+  <link rel="stylesheet" href="styles.css?v=20260731ui2">
 </head>
 <body class="page-app">
   <div class="app-layout">
     <header class="app-topbar">
       <div class="brand brand--compact">
-        <span class="brand-mark" aria-hidden="true">P</span>
+        <span class="brand-mark" aria-hidden="true">
+          <span>P</span>
+        </span>
         <div>
           <p class="brand-title">PaperPilot</p>
-          <p class="brand-subtitle">个人知识库</p>
+          <p class="brand-subtitle">Research intelligence</p>
         </div>
       </div>
 
-      <div class="topbar-stats" aria-label="运行状态">
-        <span class="stat-pill"><i>服务</i><strong id="healthLibraryState">…</strong></span>
+      <div class="topbar-context">
+        <span class="topbar-context__eyebrow">AI RESEARCH WORKSPACE</span>
+        <p class="status-line" id="statusLine" role="status">工作台已就绪</p>
+      </div>
+
+      <div class="topbar-stats" aria-label="工作台状态">
+        <span class="stat-pill stat-pill--state" id="serviceStatusPill" data-state="loading">
+          <span class="stat-dot" aria-hidden="true"></span>
+          <i>系统</i><strong id="healthLibraryState">连接中</strong>
+        </span>
         <span class="stat-pill"><i>模型</i><strong id="healthModelName">—</strong></span>
-        <span class="stat-pill"><i>命中</i><strong id="healthRetrievalHit">0</strong></span>
+        <span class="stat-pill"><i>引用命中</i><strong id="healthRetrievalHit">0</strong></span>
         <span class="stat-pill"><i>路径</i><strong id="healthResponsePath">—</strong></span>
       </div>
 
       <div class="topbar-user">
-        <span class="user-chip" id="authUserLabel">用户</span>
-        <button type="button" class="btn btn-ghost" id="logoutBtn">退出</button>
+        <span class="user-avatar" id="authUserAvatar" aria-hidden="true">研</span>
+        <span class="user-chip" id="authUserLabel">研究者</span>
+        <button type="button" class="btn btn-quiet btn-sm" id="logoutBtn">退出</button>
       </div>
     </header>
 
     <div class="app-body">
-      <!-- Left: libraries -->
       <aside class="rail rail--left reveal" aria-label="知识库">
-        <div class="rail-head">
-          <h2>知识库</h2>
-          <p>私有 · 可多建</p>
+        <div class="rail-head rail-head--inverse">
+          <div>
+            <span class="section-kicker">RESEARCH SPACES</span>
+            <h2>我的知识库</h2>
+          </div>
+          <span class="count-badge" id="libraryCount">0</span>
         </div>
 
         <div class="create-row">
-          <input id="newLibraryName" type="text" placeholder="新库名称" aria-label="新知识库名称">
-          <button type="button" class="btn btn-primary btn-sm" id="createLibraryBtn">创建</button>
+          <input id="newLibraryName" type="text" placeholder="输入新库名称" aria-label="新知识库名称">
+          <button type="button" class="btn btn-accent btn-square" id="createLibraryBtn" aria-label="创建知识库" title="创建知识库">＋</button>
         </div>
 
         <ul id="libraryList" class="lib-list"></ul>
 
         <div class="rail-actions">
-          <button type="button" class="btn btn-ghost btn-sm" id="renameLibraryBtn">重命名</button>
-          <button type="button" class="btn btn-ghost btn-sm btn-danger" id="deleteLibraryBtn">删除</button>
+          <button type="button" class="btn btn-dark-ghost btn-sm" id="renameLibraryBtn">重命名</button>
+          <button type="button" class="btn btn-dark-ghost btn-sm btn-danger-on-dark" id="deleteLibraryBtn">删除</button>
         </div>
-        <p class="hint" id="activeLibraryHint">选择一个库以上传论文。</p>
 
-        <div class="rail-block">
-          <h3>问答检索范围</h3>
-          <p class="hint">可多选，决定对话检索哪些库</p>
+        <div class="rail-block scope-block">
+          <div class="rail-block__title">
+            <div>
+              <span class="section-kicker">QUERY SCOPE</span>
+              <h3>本轮检索范围</h3>
+            </div>
+            <span class="count-badge count-badge--soft" id="queryScopeCount">0</span>
+          </div>
+          <p class="hint">可组合多个知识库进行交叉分析</p>
           <div id="queryLibraryChecks" class="check-stack"></div>
+        </div>
+
+        <div class="privacy-note">
+          <span class="privacy-note__mark" aria-hidden="true">✓</span>
+          <p><strong>私有工作区</strong><span>文件与对话按账号隔离存储</span></p>
         </div>
       </aside>
 
-      <!-- Center: chat as primary -->
       <section class="chat-stage reveal" aria-label="知识库对话" id="chatDock">
         <div class="chat-stage__head">
-          <div>
-            <h2>文献对话</h2>
-            <p id="chatDockDocLabel">请先勾选左侧知识库</p>
+          <div class="chat-title-group">
+            <span class="section-kicker">EVIDENCE-GROUNDED CHAT</span>
+            <div class="chat-title-row">
+              <h1>文献对话</h1>
+              <span class="evidence-badge"><i aria-hidden="true"></i> 基于原文</span>
+            </div>
+            <p id="chatDockDocLabel">请先从左侧选择检索知识库</p>
           </div>
-          <div class="chat-head-actions">
-            <select id="conversationSelect" class="conv-select" aria-label="历史会话"></select>
-            <button
-              type="button"
-              class="btn btn-ghost btn-sm memory-toggle"
-              id="memoryToggleBtn"
-              disabled
-              title="会话长记忆"
-            >长记忆：—</button>
-            <button type="button" class="btn btn-ghost btn-sm" id="newConversationBtn">新对话</button>
-            <button type="button" class="btn btn-ghost btn-sm" id="ragClearChatBtn">新开并清空</button>
+
+          <div class="chat-session-panel">
+            <label class="conversation-field">
+              <span>历史会话</span>
+              <select id="conversationSelect" class="conv-select" aria-label="历史会话"></select>
+            </label>
+            <div class="chat-head-actions">
+              <button
+                type="button"
+                class="btn btn-ghost btn-sm memory-toggle"
+                id="memoryToggleBtn"
+                disabled
+                title="会话长记忆"
+              >长记忆：—</button>
+              <button type="button" class="btn btn-ghost btn-sm" id="newConversationBtn">＋ 新对话</button>
+              <button type="button" class="btn btn-quiet btn-sm" id="ragClearChatBtn" title="清空当前视图并新开会话">重置</button>
+            </div>
           </div>
         </div>
 
         <div class="chat-stage__messages" id="ragChatMessages" role="log" aria-live="polite">
           <div class="chat-empty" id="chatEmpty">
-            <p class="chat-empty__title">从一篇论文问起</p>
-            <p>勾选知识库后，试试：「这篇工作的主要贡献是什么？」</p>
+            <div class="chat-empty__mark" aria-hidden="true">
+              <span>P</span>
+            </div>
+            <span class="section-kicker">START WITH EVIDENCE</span>
+            <p class="chat-empty__title">让论文先回答，再由你判断。</p>
+            <p class="chat-empty__lead">选择知识库后，PaperPilot 会从原文定位证据，并将页码与摘录放在答案旁。</p>
+            <div class="prompt-suggestions" aria-label="推荐问题">
+              <button type="button" data-prompt="总结这些论文的核心贡献">提炼核心贡献</button>
+              <button type="button" data-prompt="梳理这些论文的实验设计与关键指标">梳理实验设计</button>
+              <button type="button" data-prompt="比较这些论文的方法差异、优势与局限">比较方法差异</button>
+            </div>
+            <p class="chat-empty__footnote"><i aria-hidden="true"></i> 每个结论都可回到 PDF 原页核验</p>
           </div>
         </div>
 
@@ -93,48 +133,69 @@
           <textarea
             id="ragQuestion"
             rows="3"
-            placeholder="基于所选知识库提问… Enter 发送，Shift+Enter 换行"
+            placeholder="向你的论文提问，或要求跨文献比较…"
           ></textarea>
           <div class="composer-bar">
-            <label class="model-inline">
-              <span>模型</span>
-              <input id="modelSelect" type="text" value="deepseek-v4-flash" list="modelHints">
-              <datalist id="modelHints">
-                <option value="deepseek-v4-flash"></option>
-                <option value="deepseek-v4-pro"></option>
-              </datalist>
-            </label>
-            <button type="button" class="btn btn-primary" id="ragQueryBtn" disabled>发送</button>
+            <div class="composer-options">
+              <label class="model-inline">
+                <span>推理模型</span>
+                <input id="modelSelect" type="text" value="deepseek-v4-flash" list="modelHints">
+                <datalist id="modelHints">
+                  <option value="deepseek-v4-flash"></option>
+                  <option value="deepseek-v4-pro"></option>
+                </datalist>
+              </label>
+              <span class="composer-hint">Enter 发送 · Shift + Enter 换行</span>
+            </div>
+            <button type="button" class="btn btn-primary composer-submit" id="ragQueryBtn" disabled>
+              <span>发送问题</span><b aria-hidden="true">↗</b>
+            </button>
           </div>
         </div>
       </section>
 
-      <!-- Right: upload & docs -->
       <aside class="rail rail--right reveal" aria-label="文献管理">
         <div class="rail-head">
-          <h2>文献入库</h2>
-          <p>上传到当前选中库</p>
+          <div>
+            <span class="section-kicker">SOURCE LIBRARY</span>
+            <h2>文献管理</h2>
+          </div>
+          <span class="count-badge count-badge--paper" id="documentCount">0</span>
         </div>
 
-        <label class="file-drop" for="pdfFile" id="fileDrop">
-          <input id="pdfFile" type="file" accept="application/pdf">
-          <span class="file-drop__title" id="fileDropTitle">选择或拖入 PDF</span>
-          <span class="file-drop__meta" id="pdfSizeHint">建议 ≤ 32 MB；扫描版将自动 OCR</span>
-          <span class="file-drop__selected" id="fileSelected" hidden></span>
-        </label>
+        <p class="active-library-card" id="activeLibraryHint">选择一个知识库以上传论文。</p>
 
-        <button type="button" class="btn btn-primary btn-block" id="uploadBtn">上传并索引</button>
-        <p class="hint hint--status" id="docStatusLine">尚未上传。</p>
-        <p class="status-line" id="statusLine" role="status">就绪</p>
+        <div class="upload-panel">
+          <div class="upload-panel__head">
+            <span>01</span>
+            <p><strong>添加论文</strong><small>系统将自动解析、OCR 与建立索引</small></p>
+          </div>
 
-        <div class="rail-block">
-          <h3>当前库文档</h3>
+          <label class="file-drop" for="pdfFile" id="fileDrop">
+            <input id="pdfFile" type="file" accept="application/pdf">
+            <span class="file-drop__icon" aria-hidden="true">PDF</span>
+            <span class="file-drop__title" id="fileDropTitle">选择或拖入 PDF</span>
+            <span class="file-drop__meta" id="pdfSizeHint">单篇建议 ≤ 32 MB</span>
+            <span class="file-drop__selected" id="fileSelected" hidden></span>
+          </label>
+
+          <button type="button" class="btn btn-primary btn-block" id="uploadBtn">上传并建立索引</button>
+          <p class="hint hint--status" id="docStatusLine">尚未选择文件。</p>
+        </div>
+
+        <div class="rail-block document-block">
+          <div class="rail-block__title">
+            <div>
+              <span class="section-kicker">INDEXED PAPERS</span>
+              <h3>当前库文档</h3>
+            </div>
+          </div>
           <ul id="documentList" class="doc-list"></ul>
         </div>
       </aside>
     </div>
   </div>
 
-  <script src="app.js?v=20260731m1"></script>
+  <script src="app.js?v=20260731ui2"></script>
 </body>
 </html>

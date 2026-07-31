@@ -2,10 +2,14 @@ const TOKEN_KEY = "paperpilot_token";
 
 const statusLine = document.getElementById("statusLine");
 const authUserLabel = document.getElementById("authUserLabel");
+const authUserAvatar = document.getElementById("authUserAvatar");
 const logoutBtn = document.getElementById("logoutBtn");
 const libraryList = document.getElementById("libraryList");
+const libraryCount = document.getElementById("libraryCount");
 const documentList = document.getElementById("documentList");
+const documentCount = document.getElementById("documentCount");
 const queryLibraryChecks = document.getElementById("queryLibraryChecks");
+const queryScopeCount = document.getElementById("queryScopeCount");
 const newLibraryName = document.getElementById("newLibraryName");
 const createLibraryBtn = document.getElementById("createLibraryBtn");
 const renameLibraryBtn = document.getElementById("renameLibraryBtn");
@@ -31,6 +35,7 @@ const healthLibraryState = document.getElementById("healthLibraryState");
 const healthModelName = document.getElementById("healthModelName");
 const healthRetrievalHit = document.getElementById("healthRetrievalHit");
 const healthResponsePath = document.getElementById("healthResponsePath");
+const serviceStatusPill = document.getElementById("serviceStatusPill");
 
 let token = localStorage.getItem(TOKEN_KEY) || "";
 /** @type {Array<any>} */
@@ -461,6 +466,7 @@ function updateActiveHint() {
 
 function updateQueryReady() {
   const n = selectedQueryLibraryIds.size;
+  if (queryScopeCount) queryScopeCount.textContent = String(n);
   if (chatDockDocLabel) {
     chatDockDocLabel.textContent = n > 0 ? `已选 ${n} 个知识库参与检索` : "请先勾选左侧知识库";
   }
@@ -469,6 +475,7 @@ function updateQueryReady() {
 
 function renderLibraries() {
   if (!libraryList) return;
+  if (libraryCount) libraryCount.textContent = String(libraries.length);
   libraryList.innerHTML = "";
   if (!libraries.length) {
     libraryList.innerHTML = "<li class='muted'>暂无知识库，先创建一个。</li>";
@@ -532,10 +539,12 @@ async function refreshLibraries() {
 async function refreshDocuments() {
   if (!documentList) return;
   if (!activeLibraryId) {
+    if (documentCount) documentCount.textContent = "0";
     documentList.innerHTML = "<li class='muted'>请先选择知识库。</li>";
     return;
   }
   const docs = await api(`/api/libraries/${activeLibraryId}/documents`);
+  if (documentCount) documentCount.textContent = String(docs.length);
   documentList.innerHTML = "";
   if (!docs.length) {
     documentList.innerHTML = "<li class='muted'>当前库暂无文档。</li>";
@@ -596,17 +605,25 @@ async function refreshDocuments() {
 async function refreshHealth() {
   try {
     const h = await api("/api/health");
+    let state = "ok";
     if (healthLibraryState) {
-      healthLibraryState.textContent = !h.database
-        ? "数据库异常"
-        : h.worker_alive === false
-          ? "Worker 离线"
-          : h.has_api_key
-            ? "可用"
-            : "缺 Key";
+      if (!h.database) {
+        healthLibraryState.textContent = "数据库异常";
+        state = "error";
+      } else if (h.worker_alive === false) {
+        healthLibraryState.textContent = "Worker 离线";
+        state = "warning";
+      } else if (!h.has_api_key) {
+        healthLibraryState.textContent = "缺少模型配置";
+        state = "warning";
+      } else {
+        healthLibraryState.textContent = "运行正常";
+      }
     }
+    if (serviceStatusPill) serviceStatusPill.dataset.state = state;
   } catch {
     if (healthLibraryState) healthLibraryState.textContent = "离线";
+    if (serviceStatusPill) serviceStatusPill.dataset.state = "error";
   }
   if (healthModelName && modelSelect) {
     healthModelName.textContent = modelSelect.value || "—";
@@ -903,6 +920,19 @@ ragQuestion?.addEventListener("keydown", (ev) => {
   }
 });
 
+document.querySelectorAll("[data-prompt]").forEach((button) => {
+  button.addEventListener("click", () => {
+    if (!ragQuestion) return;
+    ragQuestion.value = button.getAttribute("data-prompt") || "";
+    ragQuestion.focus();
+    setStatus(
+      selectedQueryLibraryIds.size
+        ? "示例问题已填入，可以直接发送。"
+        : "示例问题已填入，请先选择检索知识库。"
+    );
+  });
+});
+
 newConversationBtn?.addEventListener("click", async () => {
   try {
     const library_ids = [...selectedQueryLibraryIds];
@@ -987,7 +1017,9 @@ modelSelect?.addEventListener("change", () => {
   }
   try {
     const me = await api("/api/auth/me");
-    if (authUserLabel) authUserLabel.textContent = me.username || "用户";
+    const username = me.username || "研究者";
+    if (authUserLabel) authUserLabel.textContent = username;
+    if (authUserAvatar) authUserAvatar.textContent = username.trim().slice(0, 1) || "研";
     await refreshHealth();
     await refreshLibraries();
     await refreshConversations();

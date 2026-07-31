@@ -70,7 +70,7 @@ function startCooldown(seconds) {
     if (left <= 0) {
       clearInterval(codeCooldownTimer);
       btn.disabled = false;
-      btn.textContent = "获取验证码";
+      btn.textContent = "发送邮箱验证码";
       return;
     }
     btn.textContent = `${left}s 后重发`;
