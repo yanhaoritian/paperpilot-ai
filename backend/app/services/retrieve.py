@@ -43,11 +43,16 @@ def retrieve_chunks(
     question: str,
     top_k: int | None = None,
     min_similarity: float | None = None,
+    query_vector: list[float] | None = None,
 ) -> list[RetrievedChunk]:
     if not library_ids:
         return []
     settings = get_settings()
-    q_vec = embed_texts([question])[0]
+    q_vec = (
+        query_vector
+        if query_vector is not None
+        else embed_texts([question])[0]
+    )
     k = top_k or settings.rag_top_k
     min_sim = settings.rag_min_similarity if min_similarity is None else min_similarity
 

@@ -46,6 +46,8 @@ class ParseResult:
     page_count: int
     full_text: str
     routes_used: dict[str, int] = field(default_factory=dict)
+    empty_pages: int = 0
+    empty_pages_after_ocr_cap: int = 0
 
     @property
     def ocr_used(self) -> bool:
@@ -219,9 +221,12 @@ def parse_pdf_pages(data: bytes) -> ParseResult:
             )
 
         # remaining pages beyond OCR cap: digital-only best effort
+        empty_after_cap = 0
         for i in range(n, len(doc)):
             page = doc.load_page(i)
             text = (page.get_text("text") or "").strip()
+            if not text:
+                empty_after_cap += 1
             routes_used["digital"] = routes_used.get("digital", 0) + 1
             pages_out.append(
                 PageBundle(page_no=i + 1, route="digital", text=text, char_count=len(text))
@@ -237,6 +242,8 @@ def parse_pdf_pages(data: bytes) -> ParseResult:
             page_count=len(doc),
             full_text=full_text,
             routes_used=routes_used,
+            empty_pages=sum(1 for p in pages_out if not p.text.strip()),
+            empty_pages_after_ocr_cap=empty_after_cap,
         )
     finally:
         doc.close()

@@ -20,7 +20,11 @@ from app.services.intent import (
     list_library_documents,
 )
 from app.services.quotas import consume_query_quota
-from app.services.response_cache import make_query_cache_key, query_cache
+from app.services.response_cache import (
+    corpus_revision,
+    make_query_cache_key,
+    query_cache,
+)
 
 router = APIRouter(prefix="/api", tags=["query"])
 
@@ -62,18 +66,40 @@ def query_libraries(
     question = body.question.strip()
     intent = detect_intent(question)
     settings = get_settings()
+    if not settings.chat_model_is_allowed(body.model):
+        raise HTTPException(status_code=400, detail="所选模型不在服务端允许列表中")
+    revision = corpus_revision(
+        db,
+        owner_id=user.id,
+        library_ids=library_ids,
+    )
     cache_key = make_query_cache_key(
         owner_id=user.id,
         library_ids=library_ids,
         question=question,
-        model=body.model,
+        model=body.model or settings.default_model,
         temperature=body.temperature,
         intent=intent.value,
+        corpus_revision=revision,
+        prompt_version=settings.prompt_version,
     )
     if settings.response_cache_ttl_ms > 0:
         cached = query_cache().get(cache_key)
         if isinstance(cached, dict):
             return QueryResponse(**cached)
+
+    inventory = []
+    if intent == QueryIntent.COMPARE:
+        inventory = list_library_documents(db, owner_id=user.id, library_ids=library_ids)
+        ready_count = sum(1 for item in inventory if item.status == "ready")
+        if ready_count > settings.compare_max_documents:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"当前选择中有 {ready_count} 篇可检索文献，超过单次全量对比上限 "
+                    f"{settings.compare_max_documents} 篇；请缩小知识库范围后重试"
+                ),
+            )
 
     consume_query_quota(db, user.id)
 
@@ -87,11 +113,17 @@ def query_libraries(
             )
         return result
 
-    inventory = list_library_documents(db, owner_id=user.id, library_ids=library_ids)
-    inventory_text = format_inventory_block(inventory)
-    cards = ensure_document_snapshots(db, owner_id=user.id, library_ids=library_ids)
-    cards_text = format_document_context_cards(cards)
+    if not inventory:
+        inventory = list_library_documents(db, owner_id=user.id, library_ids=library_ids)
+    inventory_text = format_inventory_block(
+        inventory,
+        max_items=settings.inventory_prompt_max_documents,
+    )
     compare = intent == QueryIntent.COMPARE
+    cards_text = None
+    if compare or len(inventory) <= 3:
+        cards = ensure_document_snapshots(db, owner_id=user.id, library_ids=library_ids)
+        cards_text = format_document_context_cards(cards)
     retrieved = hybrid_retrieve(
         db,
         owner_id=user.id,

@@ -14,7 +14,7 @@
 - **上传 PDF**：后台自动解析、切分并建索引；扫描件可走 OCR。
 - **基于文献回答**：只依据库内检索到的内容作答；证据不足会说明，而不是硬编。
 - **多文献对比**：例如「两篇文章有何共同点和不同点」，会综合多篇并尽量用表格对照。
-- **连续对话**：会话可保存、切换；回答流式输出。
+- **连续对话与长记忆**：会话可保存、切换；最近轮次、滚动摘要和相关旧记忆分层参与追问。
 - **账号隔离**：每个账号只能看到自己的库与文档。
 
 ---
@@ -120,7 +120,62 @@
 docker compose up --build -d
 ```
 
-详细变量说明见 `.env.example`。公网部署时请设置 `CORS_ORIGINS` 为你的域名，并保持 `AUTH_EXPOSE_CODE=0`。
+详细变量说明见 `.env.example`。`POSTGRES_PASSWORD` 必须填写；API 与数据库默认只绑定
+`127.0.0.1`，如确需对其他主机开放，请显式设置 `API_BIND_HOST` / `DB_BIND_HOST` 并配合防火墙。
+公网部署时请设置 `CORS_ORIGINS` 为你的域名，并保持 `AUTH_EXPOSE_CODE=0`。
+
+生产升级前先备份数据库与 PDF，再显式执行迁移：
+
+```bash
+./scripts/backup.sh
+docker compose --profile tools run --rm migrate
+docker compose up --build -d
+```
+
+Windows 本地环境可使用 `.\scripts\backup.ps1`。备份同时包含 PostgreSQL custom-format
+dump、数据库表计数、PDF 副本及 SHA-256 清单；只有在备份归档可读取、文件清单可校验后，
+才应继续生产迁移。
+
+Compose 默认启用独立 `worker` 服务；API 只写入持久化索引队列，OCR、Embedding 与
+Vision 不再占用 Web 请求进程。单进程本地调试可设置 `INDEX_EXTERNAL_WORKER=0`。
+Worker 会持续写入存活心跳，并为正在处理的任务续租；`/api/health` 可查看 Worker
+是否在线、心跳延迟、pending/running/failed 队列数、最老等待时间及最近一小时成功/
+失败任务数，也会显示会话记忆数量、待压缩会话数和最近更新时间。租约时长可通过
+`INDEX_WORKER_LEASE_SECONDS` 调整，建议至少为心跳间隔的三倍。
+生产镜像已包含 RapidOCR/OpenCV 所需的最小 Linux 运行库；CI 会同时验证 PostgreSQL
+迁移零漂移、多 Worker 互斥领取以及 OCR 模块可导入。
+PDF 路径以 `用户/知识库/文档.pdf` 的相对形式保存；迁移会自动兼容旧版 Windows 或
+Linux 绝对路径，因此同一数据库可在本地与容器部署之间迁移。
+
+正式迁移或备份后可执行只读一致性审计：
+
+```bash
+docker compose run --rm --no-deps api \
+  python /app/backend/scripts/audit_storage.py --verify-hash --check-orphans
+```
+
+命令会检查数据库中的每篇文档是否有对应 PDF、文件头是否有效，以及 SHA-256 是否与
+上传时记录一致，同时检查磁盘上是否存在没有数据库记录的孤儿 PDF；任一检查失败都会
+以非零状态退出。
+
+用户、知识库、文档元数据、会话、原始消息、派生会话记忆、配额、索引任务、文本块和向量都记录在
+PostgreSQL；PDF 原文件保存在 `data/pdfs/<用户ID>/<知识库ID>/<文档ID>.pdf`，数据库
+只保存可移植相对路径、文件哈希和解析状态。删除文档或知识库时会同步删除对应 PDF；
+数据库与 `data/pdfs` 必须作为一个恢复单元一起备份。
+
+### 开发与验证
+
+```bash
+cd backend
+python -m venv .venv
+# Windows: .venv\Scripts\pip install -r requirements.txt
+# Linux/macOS: .venv/bin/pip install -r requirements.txt
+python -m pytest -q
+```
+
+完整的分阶段工程化计划见 [`docs/OPTIMIZATION_PLAN.md`](docs/OPTIMIZATION_PLAN.md)。
+长上下文、滚动摘要、记忆召回与隐私边界见
+[`docs/MEMORY_ARCHITECTURE.md`](docs/MEMORY_ARCHITECTURE.md)。
 
 ---
 

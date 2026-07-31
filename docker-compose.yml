@@ -5,10 +5,11 @@ services:
     image: pgvector/pgvector:pg16
     environment:
       POSTGRES_USER: paperpilot
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-paperpilot}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set_POSTGRES_PASSWORD_in_dot_env}
       POSTGRES_DB: paperpilot
+    restart: unless-stopped
     ports:
-      - "5432:5432"
+      - "${DB_BIND_HOST:-127.0.0.1}:5432:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
     healthcheck:
@@ -21,18 +22,22 @@ services:
     build:
       context: .
       dockerfile: backend/Dockerfile
+    init: true
+    restart: unless-stopped
     ports:
-      - "8787:8787"
+      - "${API_BIND_HOST:-127.0.0.1}:8787:8787"
     env_file:
       - .env
     environment:
       # Lab default: Postgres + pgvector (overrides local sqlite in .env)
-      DATABASE_URL: postgresql+psycopg2://paperpilot:${POSTGRES_PASSWORD:-paperpilot}@db:5432/paperpilot
+      DATABASE_URL: postgresql+psycopg2://paperpilot:${POSTGRES_PASSWORD:?Set_POSTGRES_PASSWORD_in_dot_env}@db:5432/paperpilot
       JWT_SECRET: ${JWT_SECRET:?Set_JWT_SECRET_in_dot_env}
       JWT_REQUIRE_STRONG: ${JWT_REQUIRE_STRONG:-1}
       AUTH_EXPOSE_CODE: ${AUTH_EXPOSE_CODE:-0}
       AUTH_ALLOW_PHONE_REGISTER: ${AUTH_ALLOW_PHONE_REGISTER:-0}
+      TRUSTED_PROXY_CIDRS: ${TRUSTED_PROXY_CIDRS:-127.0.0.1/32,::1/128,172.16.0.0/12}
       INDEX_RECOVER_ON_STARTUP: ${INDEX_RECOVER_ON_STARTUP:-1}
+      INDEX_EXTERNAL_WORKER: ${INDEX_EXTERNAL_WORKER:-1}
       PDF_STORAGE_DIR: /app/data/pdfs
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       OPENAI_BASE_URL: ${OPENAI_BASE_URL:-https://api.openai.com/v1}
@@ -56,6 +61,61 @@ services:
       - ./auth.js:/app/auth.js:ro
       - ./app.js:/app/app.js:ro
       - ./styles.css:/app/styles.css:ro
+    depends_on:
+      db:
+        condition: service_healthy
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8787/api/health', timeout=3).read()",
+        ]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+  worker:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    init: true
+    restart: unless-stopped
+    command: ["python", "-m", "app.worker"]
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: postgresql+psycopg2://paperpilot:${POSTGRES_PASSWORD:?Set_POSTGRES_PASSWORD_in_dot_env}@db:5432/paperpilot
+      PDF_STORAGE_DIR: /app/data/pdfs
+      INDEX_EXTERNAL_WORKER: "1"
+      INDEX_RECOVER_ON_STARTUP: "0"
+    volumes:
+      - ./data/pdfs:/app/data/pdfs
+    depends_on:
+      db:
+        condition: service_healthy
+
+  migrate:
+    profiles: ["tools"]
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    command:
+      [
+        "python",
+        "-m",
+        "alembic",
+        "-c",
+        "/app/backend/alembic.ini",
+        "upgrade",
+        "head",
+      ]
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: postgresql+psycopg2://paperpilot:${POSTGRES_PASSWORD:?Set_POSTGRES_PASSWORD_in_dot_env}@db:5432/paperpilot
     depends_on:
       db:
         condition: service_healthy

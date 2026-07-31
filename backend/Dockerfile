@@ -3,15 +3,17 @@ FROM python:3.12-slim
 WORKDIR /app
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    build-essential \
-    libpq-dev \
+    libgl1 \
+    libglib2.0-0 \
+    libxcb1 \
     && rm -rf /var/lib/apt/lists/*
 
 COPY backend/requirements.txt /app/backend/requirements.txt
 # CN-friendly PyPI + ensure setuptools before packages that build from sdist (e.g. antlr4)
-RUN pip install --no-cache-dir -i https://mirrors.aliyun.com/pypi/simple/ --trusted-host mirrors.aliyun.com \
+RUN --mount=type=cache,target=/root/.cache/pip \
+    pip install -i https://mirrors.aliyun.com/pypi/simple/ --trusted-host mirrors.aliyun.com \
     -U pip setuptools wheel \
- && pip install --no-cache-dir -i https://mirrors.aliyun.com/pypi/simple/ --trusted-host mirrors.aliyun.com \
+ && pip install -i https://mirrors.aliyun.com/pypi/simple/ --trusted-host mirrors.aliyun.com \
     -r /app/backend/requirements.txt
 
 COPY backend /app/backend
@@ -21,7 +23,6 @@ ENV PYTHONPATH=/app/backend
 ENV PDF_STORAGE_DIR=/app/data/pdfs
 ENV HOST=0.0.0.0
 ENV PORT=8787
-ENV AUTH_EXPOSE_CODE=0
 ENV JWT_REQUIRE_STRONG=1
 ENV INDEX_RECOVER_ON_STARTUP=1
 

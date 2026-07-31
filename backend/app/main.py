@@ -14,17 +14,14 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
-from slowapi import Limiter
-from slowapi.util import get_remote_address
 
 from app.api import auth, conversations, documents, health, libraries, query
 from app.config import get_settings
 from app.db import init_db
+from app.services.client_ip import client_ip
 
 settings = get_settings()
 ROOT = Path(__file__).resolve().parents[2]
-
-limiter = Limiter(key_func=get_remote_address, default_limits=[])
 
 
 class JsonLogFormatter(logging.Formatter):
@@ -76,7 +73,7 @@ async def lifespan(_app: FastAPI):
         "sqlite" if cfg.is_sqlite else "postgres",
         cfg.auth_expose_code,
     )
-    if cfg.index_recover_on_startup:
+    if cfg.index_recover_on_startup and not cfg.index_external_worker:
         from app.services.index_recovery import reclaim_and_retry_indexing
 
         threading.Thread(
@@ -89,7 +86,6 @@ async def lifespan(_app: FastAPI):
 
 def create_app() -> FastAPI:
     app = FastAPI(title=settings.app_name, version="1.0.0", lifespan=lifespan)
-    app.state.limiter = limiter
 
     origins = [o.strip() for o in settings.cors_origins.split(",") if o.strip()]
     allow_all = (not origins) or origins == ["*"]
@@ -121,7 +117,7 @@ def create_app() -> FastAPI:
         request_id = request.headers.get("x-request-id") or str(uuid.uuid4())
         start = time.perf_counter()
         path = request.url.path
-        client = get_remote_address(request)
+        client = client_ip(request, settings.trusted_proxy_cidrs)
 
         if path.startswith("/api/"):
             window = settings.rate_limit_window_seconds
@@ -148,6 +144,23 @@ def create_app() -> FastAPI:
         response = await call_next(request)
         latency_ms = round((time.perf_counter() - start) * 1000, 2)
         response.headers["X-Request-Id"] = request_id
+        response.headers.setdefault("X-Content-Type-Options", "nosniff")
+        response.headers.setdefault("X-Frame-Options", "DENY")
+        response.headers.setdefault("Referrer-Policy", "same-origin")
+        response.headers.setdefault(
+            "Permissions-Policy",
+            "camera=(), microphone=(), geolocation=(), payment=()",
+        )
+        response.headers.setdefault(
+            "Content-Security-Policy",
+            "default-src 'self'; "
+            "script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net; "
+            "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com https://cdn.jsdelivr.net; "
+            "font-src 'self' https://fonts.gstatic.com data:; "
+            "img-src 'self' data: blob: https://fastapi.tiangolo.com; "
+            "connect-src 'self'; object-src 'none'; base-uri 'self'; "
+            "frame-ancestors 'none'; form-action 'self'",
+        )
         logger.info(
             "request",
             extra={

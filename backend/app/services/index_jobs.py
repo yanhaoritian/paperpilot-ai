@@ -14,7 +14,13 @@ from app.models import IndexJob, IndexJobStatus
 logger = logging.getLogger(__name__)
 
 
-def enqueue_index_job(db: Session, *, document_id: str, owner_id: str) -> IndexJob | None:
+def enqueue_index_job(
+    db: Session,
+    *,
+    document_id: str,
+    owner_id: str,
+    commit: bool = True,
+) -> IndexJob | None:
     settings = get_settings()
     if not settings.index_job_enabled:
         return None
@@ -33,8 +39,11 @@ def enqueue_index_job(db: Session, *, document_id: str, owner_id: str) -> IndexJ
         attempts=0,
     )
     db.add(job)
-    db.commit()
-    db.refresh(job)
+    if commit:
+        db.commit()
+        db.refresh(job)
+    else:
+        db.flush()
     return job
 
 
@@ -45,7 +54,13 @@ def mark_job_running(db: Session, document_id: str) -> None:
         select(IndexJob)
         .where(
             IndexJob.document_id == document_id,
-            IndexJob.status.in_([IndexJobStatus.pending.value, IndexJobStatus.running.value]),
+            IndexJob.status.in_(
+                [
+                    IndexJobStatus.pending.value,
+                    IndexJobStatus.running.value,
+                    IndexJobStatus.failed.value,
+                ]
+            ),
         )
         .order_by(IndexJob.created_at.desc())
     )
@@ -72,6 +87,26 @@ def mark_job_done(db: Session, document_id: str) -> None:
     job.finished_at = datetime.now(timezone.utc)
     job.updated_at = datetime.now(timezone.utc)
     job.last_error = None
+    job.lease_owner = None
+    job.lease_expires_at = None
+    db.commit()
+
+
+def mark_job_retrying(db: Session, document_id: str, error: str) -> None:
+    """Keep ownership while the same worker performs an in-process retry."""
+    if not get_settings().index_job_enabled:
+        return
+    job = db.scalar(
+        select(IndexJob)
+        .where(IndexJob.document_id == document_id)
+        .order_by(IndexJob.created_at.desc())
+    )
+    if not job:
+        return
+    job.status = IndexJobStatus.running.value
+    job.updated_at = datetime.now(timezone.utc)
+    job.last_error = (error or "")[:500]
+    job.finished_at = None
     db.commit()
 
 
@@ -89,4 +124,6 @@ def mark_job_failed(db: Session, document_id: str, error: str) -> None:
     job.finished_at = datetime.now(timezone.utc)
     job.updated_at = datetime.now(timezone.utc)
     job.last_error = (error or "")[:500]
+    job.lease_owner = None
+    job.lease_expires_at = None
     db.commit()

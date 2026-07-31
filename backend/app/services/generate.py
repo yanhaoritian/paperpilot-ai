@@ -4,7 +4,13 @@ import json
 import re
 from typing import Any
 
+from app.config import get_settings
+from app.services.conversation_memory import (
+    ConversationContext,
+    format_conversation_context,
+)
 from app.services.openai_client import chat_json
+from app.services.prompt_budget import budget_history, clip_text
 from app.services.prompts import RAG_JSON_SYSTEM, RAG_STREAM_SYSTEM
 from app.services.retrieve import RetrievedChunk
 
@@ -31,7 +37,12 @@ def _format_context_block(row: RetrievedChunk, *, include_ids: bool) -> str:
     return "\n".join(lines)
 
 
-def _format_context_grouped(retrieved: list[RetrievedChunk], *, include_ids: bool) -> str:
+def _format_context_grouped(
+    retrieved: list[RetrievedChunk],
+    *,
+    include_ids: bool,
+    max_chars: int | None = None,
+) -> str:
     """Group retrieval hits by document so each paper has a clear Context section."""
     if not retrieved:
         return "（空：无可用检索片段）"
@@ -42,13 +53,43 @@ def _format_context_grouped(retrieved: list[RetrievedChunk], *, include_ids: boo
             by_doc[row.document_id] = []
             order.append(row.document_id)
         by_doc[row.document_id].append(row)
-    sections: list[str] = []
+    raw_sections: list[str] = []
+    weights: list[float] = []
     for i, did in enumerate(order, 1):
         rows = by_doc[did]
         name = rows[0].file_name
         body = "\n\n".join(_format_context_block(r, include_ids=include_ids) for r in rows)
-        sections.append(f"#### 文献 {i}: 《{name}》（document_id={did}，片段数={len(rows)}）\n{body}")
-    return "\n\n==========\n\n".join(sections)
+        raw_sections.append(
+            f"#### 文献 {i}: 《{name}》（document_id={did}，片段数={len(rows)}）\n{body}"
+        )
+        weights.append(max(0.01, max(float(row.score or 0.0) for row in rows)))
+
+    separator = "\n\n==========\n\n"
+    if max_chars is None:
+        return separator.join(raw_sections)
+    limit = max(0, int(max_chars))
+    separator_chars = len(separator) * max(0, len(raw_sections) - 1)
+    available = max(0, limit - separator_chars)
+    if not raw_sections or available <= 0:
+        return clip_text(separator.join(raw_sections), limit)
+
+    base = min(600, max(80, available // max(1, len(raw_sections))))
+    if base * len(raw_sections) > available:
+        base = available // len(raw_sections)
+    remaining = max(0, available - base * len(raw_sections))
+    total_weight = sum(weights) or float(len(weights))
+    allocations = [
+        base + int(remaining * weight / total_weight)
+        for weight in weights
+    ]
+    rounding = available - sum(allocations)
+    for index in range(rounding):
+        allocations[index % len(allocations)] += 1
+    sections = [
+        clip_text(section, allocation)
+        for section, allocation in zip(raw_sections, allocations, strict=True)
+    ]
+    return separator.join(sections)
 
 
 def _context_source_summary(retrieved: list[RetrievedChunk]) -> str:
@@ -70,24 +111,54 @@ def _build_user_payload(
     intent_hint: str | None = None,
     document_cards_text: str | None = None,
 ) -> str:
-    context = _format_context_grouped(retrieved, include_ids=include_ids)
-    parts = [f"当前问题：{question}"]
+    settings = get_settings()
+    prompt_limit = max(6_000, int(settings.rag_prompt_max_chars))
+    parts = [f"当前问题：{clip_text(question, min(4_000, prompt_limit // 4))}"]
     if intent_hint:
-        parts.extend(["", f"意图提示：{intent_hint}"])
+        parts.extend(["", f"意图提示：{clip_text(intent_hint, 2_000)}"])
     if inventory_text:
-        parts.extend(["", inventory_text])
+        parts.extend(
+            [
+                "",
+                clip_text(inventory_text, int(settings.rag_inventory_max_chars)),
+            ]
+        )
     if document_cards_text:
-        parts.extend(["", document_cards_text])
+        parts.extend(
+            [
+                "",
+                clip_text(document_cards_text, int(settings.rag_cards_max_chars)),
+            ]
+        )
+    summary = _context_source_summary(retrieved)
+    fixed = "\n".join(
+        parts
+        + [
+            "",
+            summary,
+            "",
+            "Context（按文献分组；各组之外的内容不得当作依据）：",
+        ]
+    )
+    context_budget = min(
+        int(settings.rag_context_max_chars),
+        max(1_000, prompt_limit - len(fixed) - 1),
+    )
+    context = _format_context_grouped(
+        retrieved,
+        include_ids=include_ids,
+        max_chars=context_budget,
+    )
     parts.extend(
         [
             "",
-            _context_source_summary(retrieved),
+            summary,
             "",
             "Context（按文献分组；各组之外的内容不得当作依据）：",
             context,
         ]
     )
-    return "\n".join(parts)
+    return clip_text("\n".join(parts), prompt_limit)
 
 
 def build_rag_messages(
@@ -114,18 +185,23 @@ def build_rag_stream_messages(
     retrieved: list[RetrievedChunk],
     *,
     history: list[dict[str, str]] | None = None,
+    conversation_context: ConversationContext | None = None,
     inventory_text: str | None = None,
     intent_hint: str | None = None,
     document_cards_text: str | None = None,
 ) -> list[dict[str, str]]:
     """Messages for plain-text streaming answers (citations attached separately)."""
     messages: list[dict[str, str]] = [{"role": "system", "content": RAG_STREAM_SYSTEM}]
-    if history:
-        for turn in history:
-            role = turn.get("role")
-            content = (turn.get("content") or "").strip()
-            if role in {"user", "assistant"} and content:
-                messages.append({"role": role, "content": content})
+    settings = get_settings()
+    memory_text = format_conversation_context(
+        conversation_context,
+        max_chars=int(settings.memory_recall_max_chars),
+    )
+    if memory_text:
+        messages.append({"role": "system", "content": memory_text})
+    messages.extend(
+        budget_history(history, int(settings.rag_history_max_chars))
+    )
     messages.append(
         {
             "role": "user",
@@ -226,8 +302,9 @@ def generate_answer(
                 "file_name": src.file_name,
                 "library_id": src.library_id,
                 "excerpt": excerpt[:500],
-                "page_start": c.get("page_start", src.page_start),
-                "page_end": c.get("page_end", src.page_end),
+                # Page provenance is database metadata, never model-authored data.
+                "page_start": src.page_start,
+                "page_end": src.page_end,
                 "score": src.score,
                 "section_path": getattr(src, "section_path", None),
             }

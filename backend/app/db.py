@@ -237,6 +237,35 @@ def _migrate_chat_columns() -> None:
                     conn.execute(text("ALTER TABLE messages ADD COLUMN extra JSON"))
                 if "citations" not in cols:
                     conn.execute(text("ALTER TABLE messages ADD COLUMN citations JSON"))
+                if "sequence" not in cols:
+                    conn.execute(text("ALTER TABLE messages ADD COLUMN sequence INTEGER"))
+                    conn.execute(
+                        text(
+                            """
+                            WITH ranked AS (
+                                SELECT id, ROW_NUMBER() OVER (
+                                    PARTITION BY conversation_id
+                                    ORDER BY created_at ASC,
+                                        CASE role WHEN 'user' THEN 0 ELSE 1 END ASC,
+                                        id ASC
+                                ) AS seq
+                                FROM messages
+                            )
+                            UPDATE messages
+                            SET sequence = (
+                                SELECT seq FROM ranked WHERE ranked.id = messages.id
+                            )
+                            WHERE sequence IS NULL
+                            """
+                        )
+                    )
+                conn.execute(
+                    text(
+                        "CREATE UNIQUE INDEX IF NOT EXISTS "
+                        "uq_messages_conversation_sequence "
+                        "ON messages (conversation_id, sequence)"
+                    )
+                )
             if "conversations" in tables:
                 cols = {
                     row[1]
@@ -246,8 +275,94 @@ def _migrate_chat_columns() -> None:
                     conn.execute(text("ALTER TABLE conversations ADD COLUMN library_ids JSON"))
                 if "updated_at" not in cols:
                     conn.execute(text("ALTER TABLE conversations ADD COLUMN updated_at DATETIME"))
+                if "memory_enabled" not in cols:
+                    conn.execute(
+                        text(
+                            "ALTER TABLE conversations ADD COLUMN "
+                            "memory_enabled BOOLEAN NOT NULL DEFAULT 1"
+                        )
+                    )
+                if "memory_summary" not in cols:
+                    conn.execute(text("ALTER TABLE conversations ADD COLUMN memory_summary TEXT"))
+                if "summarized_message_count" not in cols:
+                    conn.execute(
+                        text(
+                            "ALTER TABLE conversations ADD COLUMN "
+                            "summarized_message_count INTEGER NOT NULL DEFAULT 0"
+                        )
+                    )
+                if "memory_revision" not in cols:
+                    conn.execute(
+                        text(
+                            "ALTER TABLE conversations ADD COLUMN "
+                            "memory_revision INTEGER NOT NULL DEFAULT 0"
+                        )
+                    )
+                if "memory_updated_at" not in cols:
+                    conn.execute(
+                        text(
+                            "ALTER TABLE conversations ADD COLUMN "
+                            "memory_updated_at DATETIME"
+                        )
+                    )
         else:
             conn.execute(text("ALTER TABLE messages ADD COLUMN IF NOT EXISTS extra JSONB"))
             conn.execute(text("ALTER TABLE messages ADD COLUMN IF NOT EXISTS citations JSONB"))
+            conn.execute(text("ALTER TABLE messages ADD COLUMN IF NOT EXISTS sequence INTEGER"))
+            conn.execute(
+                text(
+                    """
+                    WITH ranked AS (
+                        SELECT id, ROW_NUMBER() OVER (
+                            PARTITION BY conversation_id
+                            ORDER BY created_at ASC,
+                                CASE role WHEN 'user' THEN 0 ELSE 1 END ASC,
+                                id ASC
+                        ) AS seq
+                        FROM messages
+                    )
+                    UPDATE messages
+                    SET sequence = ranked.seq
+                    FROM ranked
+                    WHERE messages.id = ranked.id
+                      AND messages.sequence IS NULL
+                    """
+                )
+            )
+            conn.execute(text("ALTER TABLE messages ALTER COLUMN sequence SET NOT NULL"))
+            conn.execute(
+                text(
+                    "CREATE UNIQUE INDEX IF NOT EXISTS "
+                    "uq_messages_conversation_sequence "
+                    "ON messages (conversation_id, sequence)"
+                )
+            )
             conn.execute(text("ALTER TABLE conversations ADD COLUMN IF NOT EXISTS library_ids JSONB"))
             conn.execute(text("ALTER TABLE conversations ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ"))
+            conn.execute(
+                text(
+                    "ALTER TABLE conversations ADD COLUMN IF NOT EXISTS "
+                    "memory_enabled BOOLEAN NOT NULL DEFAULT TRUE"
+                )
+            )
+            conn.execute(
+                text("ALTER TABLE conversations ADD COLUMN IF NOT EXISTS memory_summary TEXT")
+            )
+            conn.execute(
+                text(
+                    "ALTER TABLE conversations ADD COLUMN IF NOT EXISTS "
+                    "summarized_message_count INTEGER NOT NULL DEFAULT 0"
+                )
+            )
+            conn.execute(
+                text(
+                    "ALTER TABLE conversations ADD COLUMN IF NOT EXISTS "
+                    "memory_revision INTEGER NOT NULL DEFAULT 0"
+                )
+            )
+            conn.execute(
+                text(
+                    "ALTER TABLE conversations ADD COLUMN IF NOT EXISTS "
+                    "memory_updated_at TIMESTAMPTZ"
+                )
+            )

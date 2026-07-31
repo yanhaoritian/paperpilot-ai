@@ -4,15 +4,23 @@ import json
 from collections.abc import Iterator
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, Depends, HTTPException, Response, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
 from fastapi.responses import StreamingResponse
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
+from starlette.background import BackgroundTask
 
 from app.config import get_settings
 from app.db import SessionLocal, get_db
 from app.deps import get_current_user
-from app.models import Conversation, Library, Message, User
+from app.models import (
+    Conversation,
+    ConversationMemory,
+    Document,
+    Library,
+    Message,
+    User,
+)
 from app.schemas import (
     ConversationCreate,
     ConversationDetail,
@@ -23,16 +31,34 @@ from app.schemas import (
 )
 from app.services.pdf_tools import iter_agent_events
 from app.services.quotas import consume_query_quota
-from app.services.response_cache import make_query_cache_key, query_cache
-from app.services.intent import detect_intent
+from app.services.response_cache import (
+    corpus_revision,
+    make_query_cache_key,
+    query_cache,
+)
+from app.services.intent import QueryIntent, detect_intent
+from app.services.conversation_memory import (
+    clear_conversation_memory,
+    refresh_conversation_memory,
+)
 
 router = APIRouter(prefix="/api/conversations", tags=["conversations"])
 
 
-def _conv_or_404(db: Session, conversation_id: str, owner_id: str) -> Conversation:
-    conv = db.scalar(
-        select(Conversation).where(Conversation.id == conversation_id, Conversation.owner_id == owner_id)
+def _conv_or_404(
+    db: Session,
+    conversation_id: str,
+    owner_id: str,
+    *,
+    lock: bool = False,
+) -> Conversation:
+    statement = select(Conversation).where(
+        Conversation.id == conversation_id,
+        Conversation.owner_id == owner_id,
     )
+    if lock:
+        statement = statement.with_for_update()
+    conv = db.scalar(statement)
     if not conv:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="会话不存在")
     return conv
@@ -63,6 +89,10 @@ def _to_out(db: Session, conv: Conversation) -> ConversationOut:
         created_at=conv.created_at,
         updated_at=conv.updated_at,
         message_count=_message_count(db, conv.id),
+        memory_enabled=bool(conv.memory_enabled),
+        memory_revision=int(conv.memory_revision or 0),
+        summarized_message_count=int(conv.summarized_message_count or 0),
+        memory_updated_at=conv.memory_updated_at,
     )
 
 
@@ -87,7 +117,12 @@ def create_conversation(
 ) -> ConversationOut:
     library_ids = _validate_libraries(db, user.id, body.library_ids or [])
     title = (body.title or "").strip() or "新对话"
-    conv = Conversation(owner_id=user.id, title=title[:200], library_ids=library_ids)
+    conv = Conversation(
+        owner_id=user.id,
+        title=title[:200],
+        library_ids=library_ids,
+        memory_enabled=bool(body.memory_enabled),
+    )
     db.add(conv)
     db.commit()
     db.refresh(conv)
@@ -97,17 +132,38 @@ def create_conversation(
 @router.get("/{conversation_id}", response_model=ConversationDetail)
 def get_conversation(
     conversation_id: str,
+    message_limit: int = Query(default=200, ge=1, le=500),
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> ConversationDetail:
     conv = _conv_or_404(db, conversation_id, user.id)
-    msgs = db.scalars(
-        select(Message).where(Message.conversation_id == conv.id).order_by(Message.created_at.asc())
-    ).all()
+    newest = list(
+        db.scalars(
+            select(Message)
+            .where(Message.conversation_id == conv.id)
+            .order_by(Message.sequence.desc())
+            .limit(message_limit)
+        ).all()
+    )
+    msgs = list(reversed(newest))
     base = _to_out(db, conv)
+    memory_entry_count = int(
+        db.scalar(
+            select(func.count())
+            .select_from(ConversationMemory)
+            .where(
+                ConversationMemory.conversation_id == conv.id,
+                ConversationMemory.owner_id == user.id,
+            )
+        )
+        or 0
+    )
     return ConversationDetail(
         **base.model_dump(),
         messages=[MessageOut.from_orm_msg(m) for m in msgs],
+        messages_truncated=base.message_count > len(msgs),
+        memory_summary=conv.memory_summary,
+        memory_entry_count=memory_entry_count,
     )
 
 
@@ -123,10 +179,30 @@ def update_conversation(
         conv.title = body.title.strip()[:200]
     if body.library_ids is not None:
         conv.library_ids = _validate_libraries(db, user.id, body.library_ids)
+    if body.memory_enabled is not None:
+        if not body.memory_enabled:
+            clear_conversation_memory(db, conv, disable=True)
+        else:
+            conv.memory_enabled = True
     conv.updated_at = datetime.now(timezone.utc)
     db.commit()
     db.refresh(conv)
     return _to_out(db, conv)
+
+
+@router.delete(
+    "/{conversation_id}/memory",
+    status_code=status.HTTP_204_NO_CONTENT,
+)
+def delete_conversation_memory(
+    conversation_id: str,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+) -> Response:
+    conv = _conv_or_404(db, conversation_id, user.id, lock=True)
+    clear_conversation_memory(db, conv, disable=True)
+    db.commit()
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
 
 
 @router.delete("/{conversation_id}", status_code=status.HTTP_204_NO_CONTENT)
@@ -152,15 +228,56 @@ def post_message_stream(
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> StreamingResponse:
-    conv = _conv_or_404(db, conversation_id, user.id)
+    # Serialize sequence allocation for concurrent sends in the same thread.
+    conv = _conv_or_404(db, conversation_id, user.id, lock=True)
     question = body.question.strip()
     library_ids = body.library_ids if body.library_ids is not None else list(conv.library_ids or [])
     library_ids = _validate_libraries(db, user.id, library_ids)
     if not library_ids:
         raise HTTPException(status_code=400, detail="请至少选择一个知识库")
+    settings = get_settings()
+    if not settings.chat_model_is_allowed(body.model):
+        raise HTTPException(status_code=400, detail="所选模型不在服务端允许列表中")
+    intent = detect_intent(question)
+    if intent == QueryIntent.COMPARE:
+        ready_count = int(
+            db.scalar(
+                select(func.count())
+                .select_from(Document)
+                .where(
+                    Document.owner_id == user.id,
+                    Document.library_id.in_(library_ids),
+                    Document.status == "ready",
+                )
+            )
+            or 0
+        )
+        if ready_count > settings.compare_max_documents:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"当前选择中有 {ready_count} 篇可检索文献，超过单次全量对比上限 "
+                    f"{settings.compare_max_documents} 篇；请缩小知识库范围后重试"
+                ),
+            )
+
+    next_sequence = int(
+        db.scalar(
+            select(func.max(Message.sequence)).where(
+                Message.conversation_id == conv.id
+            )
+        )
+        or 0
+    ) + 1
 
     # Persist user + placeholder assistant quickly so SSE can start immediately
-    user_msg = Message(conversation_id=conv.id, role="user", content=question)
+    user_msg = Message(
+        conversation_id=conv.id,
+        sequence=next_sequence,
+        role="user",
+        content=question,
+        extra={"library_ids": library_ids},
+    )
     db.add(user_msg)
     if conv.title == "新对话":
         conv.title = question[:40] + ("…" if len(question) > 40 else "")
@@ -168,45 +285,72 @@ def post_message_stream(
     conv.updated_at = datetime.now(timezone.utc)
     db.flush()
 
-    settings = get_settings()
+    recent_messages = max(2, int(settings.chat_history_turns) * 2)
+    history_limit = recent_messages
+    history_filters = [
+        Message.conversation_id == conv.id,
+        Message.id != user_msg.id,
+    ]
+    if settings.conversation_memory_enabled and conv.memory_enabled:
+        history_limit = max(
+            recent_messages,
+            int(settings.memory_summary_trigger_messages),
+            recent_messages + int(settings.memory_summary_batch_messages),
+        )
+        summarized_through = int(conv.summarized_message_count or 0)
+        if summarized_through > 0:
+            history_filters.append(Message.sequence > summarized_through)
     history_rows = db.scalars(
         select(Message)
-        .where(Message.conversation_id == conv.id, Message.id != user_msg.id)
-        .order_by(Message.created_at.desc())
-        .limit(settings.chat_history_turns * 2)
+        .where(*history_filters)
+        .order_by(Message.sequence.desc())
+        .limit(history_limit)
     ).all()
     history = [
         {"role": m.role, "content": m.content}
         for m in reversed(history_rows)
         if m.role in {"user", "assistant"} and (m.content or "").strip()
     ]
-    # Cache only turn-0 questions (no prior history) — identical follow-ups differ by context.
-    cacheable = len(history) == 0 and settings.response_cache_ttl_ms > 0
+    # Cache only the first turn. A compacted old thread can have no raw history
+    # in the active window while still carrying different memory state.
+    cacheable = next_sequence == 1 and settings.response_cache_ttl_ms > 0
     cache_key = ""
     cached_final: dict | None = None
     if cacheable:
+        revision = corpus_revision(
+            db,
+            owner_id=user.id,
+            library_ids=library_ids,
+        )
         cache_key = make_query_cache_key(
             owner_id=user.id,
             library_ids=library_ids,
             question=question,
-            model=body.model,
+            model=body.model or settings.default_model,
             temperature=body.temperature,
-            intent=detect_intent(question).value,
+            intent=intent.value,
             history_fingerprint="",
+            corpus_revision=revision,
+            prompt_version=settings.prompt_version,
         )
         hit = query_cache().get(cache_key)
         if isinstance(hit, dict) and hit.get("answer"):
             cached_final = hit
 
     if cached_final is None:
-        consume_query_quota(db, user.id)
+        consume_query_quota(db, user.id, commit=False)
 
     assistant = Message(
         conversation_id=conv.id,
+        sequence=next_sequence + 1,
         role="assistant",
         content="",
         citations=None,
-        extra={"streaming": True, "cache_hit": bool(cached_final)},
+        extra={
+            "streaming": True,
+            "cache_hit": bool(cached_final),
+            "library_ids": library_ids,
+        },
     )
     db.add(assistant)
     db.commit()
@@ -221,6 +365,9 @@ def post_message_stream(
     model = body.model
     temperature = body.temperature
     ttl_ms = int(settings.response_cache_ttl_ms or 0)
+    memory_active = bool(
+        settings.conversation_memory_enabled and conv.memory_enabled
+    )
 
     def event_gen() -> Iterator[str]:
         yield _sse(
@@ -262,6 +409,7 @@ def post_message_stream(
                 for event, data in iter_agent_events(
                     work,
                     owner_id=owner_id,
+                    conversation_id=conv_id,
                     library_ids=library_ids,
                     question=question,
                     history=history,
@@ -328,6 +476,10 @@ def post_message_stream(
                 "degraded": bool(final_payload.get("degraded")),
                 "retrieval_hit": int(final_payload.get("retrieval_hit") or 0),
                 "cache_hit": bool(cached_final),
+                "library_ids": library_ids,
+                "memory": final_payload.get("memory") or {
+                    "enabled": memory_active
+                },
             },
         )
         s = SessionLocal()
@@ -347,6 +499,12 @@ def post_message_stream(
             "Cache-Control": "no-cache",
             "X-Accel-Buffering": "no",
         },
+        background=BackgroundTask(
+            refresh_conversation_memory,
+            conv_id,
+            owner_id,
+            model=model,
+        ),
     )
 
 

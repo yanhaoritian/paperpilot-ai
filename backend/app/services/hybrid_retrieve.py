@@ -97,12 +97,29 @@ def _keyword_candidates(
     settings = get_settings()
     filters = chunk_acl_filters(owner_id=owner_id, library_ids=library_ids)
     cap = max(top_n, settings.bm25_candidate_cap)
-    rows = db.execute(
+    base = (
         select(Chunk, Document.file_name)
         .join(Document, Document.id == Chunk.document_id)
         .where(*filters)
-        .limit(cap)
-    ).all()
+    )
+    if not settings.is_sqlite and settings.postgres_trigram_enabled:
+        candidate_cap = max(
+            top_n,
+            min(cap, int(settings.postgres_trigram_candidate_cap)),
+        )
+        try:
+            rows = db.execute(
+                base.order_by(Chunk.text.op("<->")(question).asc())
+                .limit(candidate_cap)
+            ).all()
+        except Exception:  # noqa: BLE001
+            db.rollback()
+            logger.exception(
+                "PostgreSQL trigram candidate search failed; falling back"
+            )
+            rows = db.execute(base.limit(cap)).all()
+    else:
+        rows = db.execute(base.limit(cap)).all()
     if settings.bm25_enabled:
         return bm25_rank(question, rows, top_n=top_n, to_retrieved=_to_retrieved)
 
@@ -262,7 +279,7 @@ def _best_chunk_for_document(
     question: str,
     q_vec: list[float] | None,
 ) -> RetrievedChunk | None:
-    rows = db.scalars(
+    rows = db.execute(
         select(Chunk, Document.file_name)
         .join(Document, Document.id == Chunk.document_id)
         .where(
@@ -359,6 +376,7 @@ def hybrid_retrieve(
     question: str,
     top_k: int | None = None,
     cover_all_docs: bool = False,
+    query_vector: list[float] | None = None,
 ) -> list[RetrievedChunk]:
     settings = get_settings()
     k = top_k or settings.rag_top_k
@@ -367,7 +385,11 @@ def hybrid_retrieve(
     if not library_ids:
         return []
 
-    q_vec = embed_texts([question])[0]
+    q_vec = (
+        query_vector
+        if query_vector is not None
+        else embed_texts([question])[0]
+    )
     if not settings.hybrid_recall_enabled:
         from app.services.retrieve import retrieve_chunks
 
@@ -377,6 +399,7 @@ def hybrid_retrieve(
             library_ids=library_ids,
             question=question,
             top_k=k,
+            query_vector=q_vec,
         )
         if cover_all_docs:
             rows = ensure_document_coverage(
@@ -468,4 +491,3 @@ def hybrid_retrieve(
             min_per_doc=2,
         )
     return rerank_chunks(question, fused, top_n=k)
-

@@ -7,7 +7,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,500;9..144,700&family=Source+Sans+3:wght@400;500;600;700&display=swap" rel="stylesheet">
-  <link rel="stylesheet" href="styles.css?v=20260720b">
+  <link rel="stylesheet" href="styles.css?v=20260731m1">
 </head>
 <body class="page-app">
   <div class="app-layout">
@@ -70,6 +70,13 @@
           </div>
           <div class="chat-head-actions">
             <select id="conversationSelect" class="conv-select" aria-label="历史会话"></select>
+            <button
+              type="button"
+              class="btn btn-ghost btn-sm memory-toggle"
+              id="memoryToggleBtn"
+              disabled
+              title="会话长记忆"
+            >长记忆：—</button>
             <button type="button" class="btn btn-ghost btn-sm" id="newConversationBtn">新对话</button>
             <button type="button" class="btn btn-ghost btn-sm" id="ragClearChatBtn">新开并清空</button>
           </div>
@@ -128,6 +135,6 @@
     </div>
   </div>
 
-  <script src="app.js?v=20260720b"></script>
+  <script src="app.js?v=20260731m1"></script>
 </body>
 </html>

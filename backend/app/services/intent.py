@@ -92,14 +92,21 @@ def list_library_documents(
     ]
 
 
-def format_inventory_block(items: list[DocInventoryItem]) -> str:
+def format_inventory_block(
+    items: list[DocInventoryItem],
+    *,
+    max_items: int = 50,
+) -> str:
     if not items:
         return "所选知识库文献清单：（空）"
     lines = [f"所选知识库文献清单（共 {len(items)} 篇，按入库顺序）："]
-    for i, d in enumerate(items, 1):
+    shown = items[: max(1, int(max_items))]
+    for i, d in enumerate(shown, 1):
         lines.append(
             f"{i}. 《{d.file_name}》（库：{d.library_name}；状态：{d.status}；约 {d.page_count} 页；document_id={d.document_id}）"
         )
+    if len(shown) < len(items):
+        lines.append(f"另有 {len(items) - len(shown)} 篇未展开；请缩小知识库范围后做全量对比。")
     ready = sum(1 for d in items if d.status == "ready")
     if ready < len(items):
         lines.append(f"其中已索引完成可检索：{ready} 篇。")

@@ -7,7 +7,7 @@ from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
 from app.db import Base
-from app.models import User, UsageDaily
+from app.models import Library, User, UsageDaily
 from app.services import quotas
 
 
@@ -58,3 +58,14 @@ def test_quota_status_shape(db):
     assert st["queries_limit"] == 2
     assert st["uploads_limit"] == 1
     assert "day" in st
+
+
+def test_query_quota_can_join_callers_transaction(db):
+    session, uid = db
+    library = Library(owner_id=uid, name="rolled back")
+    session.add(library)
+    session.flush()
+    quotas.consume_query_quota(session, uid, commit=False)
+    session.rollback()
+    assert session.query(Library).filter_by(name="rolled back").first() is None
+    assert session.query(UsageDaily).filter_by(user_id=uid).first() is None

@@ -1,6 +1,5 @@
-from app.services.pdf_parse import _classify_page
+from app.services.pdf_parse import LayoutSpan, PageBundle, ParseResult, _classify_page
 from app.services.structure import restore_structure
-from app.services.pdf_parse import PageBundle, ParseResult
 
 
 def test_classify_page_routes():
@@ -24,3 +23,24 @@ def test_restore_structure_pages():
     assert blocks
     assert all(b.page_start >= 1 for b in blocks)
     assert any(b.role in {"section_heading", "paragraph", "title"} for b in blocks)
+
+
+def test_largest_font_span_can_be_title():
+    parse = ParseResult(
+        pages=[
+            PageBundle(
+                page_no=1,
+                route="digital",
+                text="A Novel Paper\nBody text",
+                    spans=[
+                        LayoutSpan(text="A Novel Paper", font_size=20),
+                        LayoutSpan(text="Body text", font_size=10),
+                        LayoutSpan(text="More body text", font_size=10),
+                    ],
+            )
+        ],
+        page_count=1,
+        full_text="A Novel Paper\nBody text",
+    )
+    blocks = restore_structure(parse, file_name="paper.pdf")
+    assert blocks[0].role == "title"

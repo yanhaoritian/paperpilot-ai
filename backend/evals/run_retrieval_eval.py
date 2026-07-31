@@ -95,6 +95,7 @@ def run_retrieval_eval(*, top_k: int = TOP_K) -> EvalSummary:
     settings.rerank_provider = "off"
     settings.agent_enabled = False
     settings.vision_enabled = False
+    previous_pdf_storage = settings.pdf_storage_dir
 
     gold = _load_gold()
     tmp = tempfile.mkdtemp(prefix="pp_eval_")
@@ -102,6 +103,7 @@ def run_retrieval_eval(*, top_k: int = TOP_K) -> EvalSummary:
     db_path = tmp_path / "eval.db"
     pdf_dir = tmp_path / "pdfs"
     pdf_dir.mkdir()
+    settings.pdf_storage_dir = str(pdf_dir)
 
     engine = create_engine(
         f"sqlite:///{db_path.as_posix()}",
@@ -169,6 +171,7 @@ def run_retrieval_eval(*, top_k: int = TOP_K) -> EvalSummary:
         engine.dispose()
         db_mod.engine = prev_engine
         db_mod.SessionLocal = prev_session
+        settings.pdf_storage_dir = previous_pdf_storage
         try:
             import shutil
 

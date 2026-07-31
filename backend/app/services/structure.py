@@ -36,10 +36,14 @@ def _role_for_span(text: str, font_size: float | None, median_size: float) -> st
         return "caption"
     if FOOTNOTE_RE.match(t) and len(t) < 240:
         return "footnote"
-    if HEADING_RE.match(t) or (font_size and median_size and font_size >= median_size * 1.25 and len(t) < 160):
+    if HEADING_RE.match(t):
         return "section_heading"
+    # Check title-sized text before the more permissive heading threshold.
+    # Previously every >=1.55x span matched the >=1.25x branch first.
     if font_size and median_size and font_size >= median_size * 1.55 and len(t) < 120:
         return "title"
+    if font_size and median_size and font_size >= median_size * 1.25 and len(t) < 160:
+        return "section_heading"
     if "|" in t and t.count("|") >= 2:
         return "table"
     return "paragraph"

@@ -1,23 +1,10 @@
 from __future__ import annotations
 
-import os
 import uuid
 from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
-
-TEST_DB = Path(__file__).resolve().parent / "_test_auth.db"
-if TEST_DB.exists():
-    TEST_DB.unlink()
-
-os.environ["DATABASE_URL"] = f"sqlite:///{TEST_DB.as_posix()}"
-os.environ["JWT_SECRET"] = "test-secret-at-least-24-chars-xx"
-os.environ["JWT_REQUIRE_STRONG"] = "0"
-os.environ["OPENAI_API_KEY"] = ""
-os.environ["AUTH_EXPOSE_CODE"] = "1"
-os.environ["INDEX_RECOVER_ON_STARTUP"] = "0"
-os.environ["PDF_STORAGE_DIR"] = str(Path(__file__).resolve().parent / "_test_pdfs")
 
 from app.config import get_settings
 
@@ -30,6 +17,10 @@ def client(tmp_path, monkeypatch):
     monkeypatch.setenv("AUTH_EXPOSE_CODE", "1")
     monkeypatch.setenv("JWT_REQUIRE_STRONG", "0")
     monkeypatch.setenv("INDEX_RECOVER_ON_STARTUP", "0")
+    monkeypatch.setenv("SMTP_HOST", "")
+    monkeypatch.setenv("SMTP_USER", "")
+    monkeypatch.setenv("SMTP_PASSWORD", "")
+    monkeypatch.setenv("SMTP_FROM", "")
     get_settings.cache_clear()
     from app.db import init_db
     from app.main import create_app
@@ -39,6 +30,10 @@ def client(tmp_path, monkeypatch):
     settings.auth_expose_code = True
     settings.jwt_require_strong = False
     settings.index_recover_on_startup = False
+    settings.smtp_host = ""
+    settings.smtp_user = ""
+    settings.smtp_password = ""
+    settings.smtp_from = ""
     init_db()
     app = create_app()
     with TestClient(app) as c:
@@ -127,10 +122,367 @@ def test_conversation_crud(client: TestClient):
     )
     assert created.status_code == 201, created.text
     cid = created.json()["id"]
+    assert created.json()["memory_enabled"] is True
     listed = client.get("/api/conversations", headers=headers)
     assert listed.status_code == 200
     assert any(c["id"] == cid for c in listed.json())
     detail = client.get(f"/api/conversations/{cid}", headers=headers)
     assert detail.status_code == 200
     assert detail.json()["messages"] == []
+    assert detail.json()["memory_summary"] is None
+    assert detail.json()["memory_entry_count"] == 0
+
+    streamed = client.post(
+        f"/api/conversations/{cid}/messages",
+        headers=headers,
+        json={"question": "空知识库里有什么？"},
+    )
+    assert streamed.status_code == 200
+    assert "event: done" in streamed.text
+    detail = client.get(f"/api/conversations/{cid}", headers=headers)
+    assert [
+        message["sequence"]
+        for message in detail.json()["messages"]
+    ] == [1, 2]
+
+    disabled = client.patch(
+        f"/api/conversations/{cid}",
+        headers=headers,
+        json={"memory_enabled": False},
+    )
+    assert disabled.status_code == 200
+    assert disabled.json()["memory_enabled"] is False
+    cleared = client.delete(
+        f"/api/conversations/{cid}/memory",
+        headers=headers,
+    )
+    assert cleared.status_code == 204
     assert client.delete(f"/api/conversations/{cid}", headers=headers).status_code == 204
+
+
+def test_upload_rejects_fake_pdf(client: TestClient):
+    email = f"pdf_{uuid.uuid4().hex[:8]}@example.com"
+    code = client.post("/api/auth/send-code", json={"channel": "email", "target": email}).json()["dev_code"]
+    token = client.post(
+        "/api/auth/register",
+        json={
+            "username": f"pdfuser_{uuid.uuid4().hex[:5]}",
+            "password": "secret12",
+            "code": code,
+            "channel": "email",
+            "email": email,
+        },
+    ).json()["access_token"]
+    headers = {"Authorization": f"Bearer {token}"}
+    lib = client.post("/api/libraries", headers=headers, json={"name": "PDF库"}).json()
+    response = client.post(
+        f"/api/libraries/{lib['id']}/documents",
+        headers=headers,
+        files={"file": ("fake.pdf", b"not a pdf", "application/pdf")},
+    )
+    assert response.status_code == 400
+    assert "PDF" in response.json()["detail"]
+
+
+def test_security_headers_are_present(client: TestClient):
+    response = client.get("/api/health")
+    assert response.status_code == 200
+    assert response.json()["worker_alive"] is None
+    assert "index_pending" in response.json()
+    assert "queue_pending" in response.json()
+    assert "queue_oldest_pending_seconds" in response.json()
+    assert "jobs_completed_last_hour" in response.json()
+    assert response.json()["conversation_memory_enabled"] is True
+    assert "memory_episodes" in response.json()
+    assert "memory_compaction_pending" in response.json()
+    assert response.headers["x-content-type-options"] == "nosniff"
+    assert response.headers["x-frame-options"] == "DENY"
+    assert "frame-ancestors 'none'" in response.headers["content-security-policy"]
+
+
+def test_original_pdf_download_requires_owner(client: TestClient, tmp_path):
+    email = f"source_{uuid.uuid4().hex[:8]}@example.com"
+    code = client.post("/api/auth/send-code", json={"channel": "email", "target": email}).json()["dev_code"]
+    token = client.post(
+        "/api/auth/register",
+        json={
+            "username": f"sourceuser_{uuid.uuid4().hex[:5]}",
+            "password": "secret12",
+            "code": code,
+            "channel": "email",
+            "email": email,
+        },
+    ).json()["access_token"]
+    headers = {"Authorization": f"Bearer {token}"}
+    me = client.get("/api/auth/me", headers=headers).json()
+    lib = client.post("/api/libraries", headers=headers, json={"name": "来源库"}).json()
+
+    source = Path(get_settings().pdf_storage_dir) / me["id"] / lib["id"] / "source.pdf"
+    source.parent.mkdir(parents=True, exist_ok=True)
+    source.write_bytes(b"%PDF-1.4\n%%EOF")
+    from app.db import SessionLocal
+    from app.models import Document
+
+    db = SessionLocal()
+    try:
+        doc = Document(
+            library_id=lib["id"],
+            owner_id=me["id"],
+            file_name="source.pdf",
+            file_path=str(source),
+            file_hash=uuid.uuid4().hex + uuid.uuid4().hex,
+            status="ready",
+        )
+        db.add(doc)
+        db.commit()
+        db.refresh(doc)
+        document_id = doc.id
+    finally:
+        db.close()
+
+    denied = client.get(f"/api/documents/{document_id}/file")
+    assert denied.status_code == 401
+    response = client.get(f"/api/documents/{document_id}/file", headers=headers)
+    assert response.status_code == 200
+    assert response.headers["content-type"] == "application/pdf"
+    assert response.content.startswith(b"%PDF-")
+
+
+def test_external_worker_mode_only_enqueues_upload(client: TestClient, monkeypatch):
+    email = f"queue_{uuid.uuid4().hex[:8]}@example.com"
+    code = client.post("/api/auth/send-code", json={"channel": "email", "target": email}).json()["dev_code"]
+    token = client.post(
+        "/api/auth/register",
+        json={
+            "username": f"queueuser_{uuid.uuid4().hex[:5]}",
+            "password": "secret12",
+            "code": code,
+            "channel": "email",
+            "email": email,
+        },
+    ).json()["access_token"]
+    headers = {"Authorization": f"Bearer {token}"}
+    lib = client.post("/api/libraries", headers=headers, json={"name": "队列库"}).json()
+
+    from app.api import documents as documents_api
+
+    scheduled: list[str] = []
+    monkeypatch.setattr(documents_api.settings, "index_external_worker", True)
+    monkeypatch.setattr(
+        documents_api,
+        "schedule_index",
+        lambda document_id, _background_tasks: scheduled.append(document_id),
+    )
+    response = client.post(
+        f"/api/libraries/{lib['id']}/documents",
+        headers=headers,
+        files={"file": ("queued.pdf", b"%PDF-1.4\n%%EOF", "application/pdf")},
+    )
+    assert response.status_code == 201, response.text
+    assert response.json()["status"] == "pending"
+    assert scheduled == []
+
+    from app.db import SessionLocal
+    from app.models import Document, IndexJob
+    from app.services.document_storage import resolve_document_path
+    from sqlalchemy import select
+
+    db = SessionLocal()
+    try:
+        job = db.scalar(
+            select(IndexJob).where(
+                IndexJob.document_id == response.json()["id"],
+                IndexJob.status == "pending",
+            )
+        )
+        assert job is not None
+        document = db.get(Document, response.json()["id"])
+        assert document.file_path == (
+            f"{document.owner_id}/{document.library_id}/{document.id}.pdf"
+        )
+        assert resolve_document_path(document).is_file()
+    finally:
+        db.close()
+
+
+def test_delete_library_removes_portable_pdf_and_database_rows(
+    client: TestClient,
+    monkeypatch,
+):
+    email = f"delete_{uuid.uuid4().hex[:8]}@example.com"
+    code = client.post(
+        "/api/auth/send-code",
+        json={"channel": "email", "target": email},
+    ).json()["dev_code"]
+    token = client.post(
+        "/api/auth/register",
+        json={
+            "username": f"deleteuser_{uuid.uuid4().hex[:5]}",
+            "password": "secret12",
+            "code": code,
+            "channel": "email",
+            "email": email,
+        },
+    ).json()["access_token"]
+    headers = {"Authorization": f"Bearer {token}"}
+    library = client.post(
+        "/api/libraries",
+        headers=headers,
+        json={"name": "待删除库"},
+    ).json()
+
+    from app.api import documents as documents_api
+
+    monkeypatch.setattr(documents_api.settings, "index_external_worker", True)
+    uploaded = client.post(
+        f"/api/libraries/{library['id']}/documents",
+        headers=headers,
+        files={"file": ("delete.pdf", b"%PDF-1.4\n%%EOF", "application/pdf")},
+    )
+    assert uploaded.status_code == 201, uploaded.text
+
+    from sqlalchemy import select
+
+    from app.db import SessionLocal
+    from app.models import Document, IndexJob
+    from app.services.document_storage import resolve_document_path
+
+    db = SessionLocal()
+    try:
+        document = db.get(Document, uploaded.json()["id"])
+        path = resolve_document_path(document)
+        assert path.is_file()
+    finally:
+        db.close()
+
+    deleted = client.delete(f"/api/libraries/{library['id']}", headers=headers)
+    assert deleted.status_code == 204, deleted.text
+    assert not path.exists()
+    assert not path.parent.exists()
+
+    db = SessionLocal()
+    try:
+        assert db.get(Document, uploaded.json()["id"]) is None
+        assert (
+            db.scalar(
+                select(IndexJob).where(
+                    IndexJob.document_id == uploaded.json()["id"]
+                )
+            )
+            is None
+        )
+    finally:
+        db.close()
+
+
+def test_upload_rolls_back_database_and_pdf_when_enqueue_fails(
+    client: TestClient,
+    monkeypatch,
+):
+    email = f"rollback_{uuid.uuid4().hex[:8]}@example.com"
+    code = client.post(
+        "/api/auth/send-code",
+        json={"channel": "email", "target": email},
+    ).json()["dev_code"]
+    token = client.post(
+        "/api/auth/register",
+        json={
+            "username": f"rollbackuser_{uuid.uuid4().hex[:5]}",
+            "password": "secret12",
+            "code": code,
+            "channel": "email",
+            "email": email,
+        },
+    ).json()["access_token"]
+    headers = {"Authorization": f"Bearer {token}"}
+    user_id = client.get("/api/auth/me", headers=headers).json()["id"]
+    library = client.post(
+        "/api/libraries",
+        headers=headers,
+        json={"name": "回滚库"},
+    ).json()
+
+    from app.api import documents as documents_api
+
+    def fail_enqueue(*_args, **_kwargs):
+        raise RuntimeError("queue unavailable")
+
+    monkeypatch.setattr(documents_api, "enqueue_index_job", fail_enqueue)
+    with pytest.raises(RuntimeError, match="queue unavailable"):
+        client.post(
+            f"/api/libraries/{library['id']}/documents",
+            headers=headers,
+            files={
+                "file": (
+                    "rollback.pdf",
+                    b"%PDF-1.4\n%%EOF",
+                    "application/pdf",
+                )
+            },
+        )
+
+    from sqlalchemy import select
+
+    from app.db import SessionLocal
+    from app.models import Document
+
+    db = SessionLocal()
+    try:
+        assert (
+            db.scalar(
+                select(Document).where(
+                    Document.library_id == library["id"],
+                    Document.owner_id == user_id,
+                )
+            )
+            is None
+        )
+    finally:
+        db.close()
+
+    storage_dir = (
+        Path(get_settings().pdf_storage_dir) / user_id / library["id"]
+    )
+    assert not storage_dir.exists()
+
+
+def test_upload_enforces_size_limit_while_streaming(
+    client: TestClient,
+    monkeypatch,
+):
+    email = f"limit_{uuid.uuid4().hex[:8]}@example.com"
+    code = client.post(
+        "/api/auth/send-code",
+        json={"channel": "email", "target": email},
+    ).json()["dev_code"]
+    token = client.post(
+        "/api/auth/register",
+        json={
+            "username": f"limituser_{uuid.uuid4().hex[:5]}",
+            "password": "secret12",
+            "code": code,
+            "channel": "email",
+            "email": email,
+        },
+    ).json()["access_token"]
+    headers = {"Authorization": f"Bearer {token}"}
+    library = client.post(
+        "/api/libraries",
+        headers=headers,
+        json={"name": "大小限制库"},
+    ).json()
+
+    from app.api import documents as documents_api
+
+    monkeypatch.setattr(documents_api.settings, "pdf_max_upload_mb", 1)
+    payload = b"%PDF-1.4\n" + (b"x" * (1024 * 1024))
+    response = client.post(
+        f"/api/libraries/{library['id']}/documents",
+        headers=headers,
+        files={"file": ("too-large.pdf", payload, "application/pdf")},
+    )
+    assert response.status_code == 400
+    assert "超过上限" in response.json()["detail"]
+
+    upload_dir = Path(get_settings().pdf_storage_dir) / ".uploads"
+    assert not upload_dir.exists()

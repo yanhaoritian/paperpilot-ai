@@ -1,8 +1,8 @@
 from __future__ import annotations
 
 import logging
-import random
 import re
+import secrets
 import smtplib
 from datetime import datetime, timedelta, timezone
 from email.message import EmailMessage
@@ -45,7 +45,7 @@ def normalize_target(channel: str, target: str) -> str:
 
 
 def generate_code() -> str:
-    return f"{random.randint(0, 999999):06d}"
+    return f"{secrets.randbelow(1_000_000):06d}"
 
 
 def _deliver_code(channel: str, target: str, code: str) -> str:

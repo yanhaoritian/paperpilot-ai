@@ -140,15 +140,18 @@ class QueryResponse(BaseModel):
 class ConversationCreate(BaseModel):
     title: str | None = Field(default=None, max_length=200)
     library_ids: list[str] = Field(default_factory=list)
+    memory_enabled: bool = True
 
 
 class ConversationUpdate(BaseModel):
     title: str | None = Field(default=None, min_length=1, max_length=200)
     library_ids: list[str] | None = None
+    memory_enabled: bool | None = None
 
 
 class MessageOut(BaseModel):
     id: str
+    sequence: int
     role: str
     content: str
     citations: list[CitationOut] | None = None
@@ -161,6 +164,7 @@ class MessageOut(BaseModel):
     def from_orm_msg(cls, msg) -> "MessageOut":  # noqa: ANN001
         return cls(
             id=msg.id,
+            sequence=int(msg.sequence),
             role=msg.role,
             content=msg.content or "",
             citations=msg.citations,
@@ -176,12 +180,19 @@ class ConversationOut(BaseModel):
     created_at: datetime
     updated_at: datetime | None = None
     message_count: int = 0
+    memory_enabled: bool = True
+    memory_revision: int = 0
+    summarized_message_count: int = 0
+    memory_updated_at: datetime | None = None
 
     model_config = {"from_attributes": True}
 
 
 class ConversationDetail(ConversationOut):
     messages: list[MessageOut] = Field(default_factory=list)
+    messages_truncated: bool = False
+    memory_summary: str | None = None
+    memory_entry_count: int = 0
 
 
 class ConversationMessageRequest(BaseModel):
@@ -195,4 +206,20 @@ class HealthResponse(BaseModel):
     status: str
     database: bool
     has_api_key: bool
+    worker_alive: bool | None = None
+    worker_heartbeat_age_seconds: int | None = None
+    index_pending: int = 0
+    index_running: int = 0
+    index_failed: int = 0
+    queue_pending: int = 0
+    queue_running: int = 0
+    queue_failed: int = 0
+    queue_oldest_pending_seconds: int | None = None
+    jobs_completed_last_hour: int = 0
+    jobs_failed_last_hour: int = 0
+    conversation_memory_enabled: bool = False
+    memory_enabled_conversations: int = 0
+    memory_episodes: int = 0
+    memory_compaction_pending: int = 0
+    memory_last_updated_at: datetime | None = None
     detail: dict | None = None

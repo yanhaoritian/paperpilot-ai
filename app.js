@@ -26,6 +26,7 @@ const chatDockDocLabel = document.getElementById("chatDockDocLabel");
 const chatEmpty = document.getElementById("chatEmpty");
 const conversationSelect = document.getElementById("conversationSelect");
 const newConversationBtn = document.getElementById("newConversationBtn");
+const memoryToggleBtn = document.getElementById("memoryToggleBtn");
 const healthLibraryState = document.getElementById("healthLibraryState");
 const healthModelName = document.getElementById("healthModelName");
 const healthRetrievalHit = document.getElementById("healthRetrievalHit");
@@ -41,6 +42,7 @@ let pollTimer = null;
 /** @type {Array<any>} */
 let conversations = [];
 let activeConversationId = "";
+let activeConversationMemoryEnabled = true;
 let streaming = false;
 
 function apiUrl(path) {
@@ -225,36 +227,141 @@ function appendChat(role, html) {
   return wrap;
 }
 
-function citationsHtml(_citations) {
-  // Citations stay in API/DB for debugging; do not render excerpt cards in the chat bubble.
-  return "";
+function citationsHtml(citations) {
+  if (!Array.isArray(citations) || citations.length === 0) return "";
+  const cards = citations.slice(0, 12).map((c, index) => {
+    const fileName = c.file_name || `来源 ${index + 1}`;
+    const pageStart = Number.isFinite(Number(c.page_start)) ? Number(c.page_start) : null;
+    const pageEnd = Number.isFinite(Number(c.page_end)) ? Number(c.page_end) : pageStart;
+    const pageLabel = pageStart
+      ? `第 ${pageStart}${pageEnd && pageEnd !== pageStart ? `–${pageEnd}` : ""} 页`
+      : "页码不可用";
+    const excerpt = String(c.excerpt || "").trim();
+    const documentId = String(c.document_id || "").trim();
+    const tag = documentId ? "button" : "div";
+    const attrs = documentId
+      ? ` type="button" data-open-document="${escapeHtml(documentId)}" data-page="${pageStart || ""}"`
+      : "";
+    return `<${tag} class="citation-card"${attrs}>
+      <span class="citation-card__index">${index + 1}</span>
+      <span class="citation-card__body">
+        <strong>${escapeHtml(fileName)}</strong>
+        <small>${escapeHtml(pageLabel)}${c.section_path ? ` · ${escapeHtml(c.section_path)}` : ""}</small>
+        ${excerpt ? `<span>${escapeHtml(excerpt)}</span>` : ""}
+      </span>
+      ${documentId ? '<span class="citation-card__open">打开原文</span>' : ""}
+    </${tag}>`;
+  }).join("");
+  return `<details class="citation-list" open>
+    <summary>原文依据（${Math.min(citations.length, 12)}）</summary>
+    <div class="citation-list__items">${cards}</div>
+  </details>`;
+}
+
+function bindCitationActions(root) {
+  if (!root) return;
+  root.querySelectorAll("[data-open-document]").forEach((btn) => {
+    if (btn.dataset.bound === "1") return;
+    btn.dataset.bound = "1";
+    btn.addEventListener("click", async () => {
+      const documentId = btn.getAttribute("data-open-document") || "";
+      const page = Number(btn.getAttribute("data-page") || 0);
+      if (!documentId) return;
+      const viewer = window.open("", "_blank");
+      btn.disabled = true;
+      try {
+        const resp = await fetch(apiUrl(`/api/documents/${encodeURIComponent(documentId)}/file`), {
+          headers: { Authorization: `Bearer ${token}` }
+        });
+        if (!resp.ok) {
+          if (resp.status === 401) {
+            localStorage.removeItem(TOKEN_KEY);
+            location.replace("/login.html");
+            return;
+          }
+          const payload = await resp.json().catch(() => null);
+          throw new Error(payload?.detail || `无法打开原文（HTTP ${resp.status}）`);
+        }
+        const url = URL.createObjectURL(await resp.blob());
+        const target = `${url}${page > 0 ? `#page=${page}` : ""}`;
+        if (viewer) {
+          viewer.location.href = target;
+        } else {
+          const link = document.createElement("a");
+          link.href = target;
+          link.target = "_blank";
+          link.rel = "noopener";
+          link.click();
+        }
+        setTimeout(() => URL.revokeObjectURL(url), 5 * 60 * 1000);
+      } catch (e) {
+        if (viewer) viewer.close();
+        setStatus(e.message || "无法打开原文", true);
+      } finally {
+        btn.disabled = false;
+      }
+    });
+  });
 }
 
 function renderAnswer(result) {
-  appendChat(
+  const bubble = appendChat(
     "assistant",
     `${formatAnswerHtml(result.answer || "")}
+     ${citationsHtml(result.citations)}
      <p class="bubble-meta">置信度 ${escapeHtml(result.confidence || "N/A")} · 命中 ${result.retrieval_hit ?? 0}</p>`
   );
+  bindCitationActions(bubble);
   if (healthRetrievalHit) healthRetrievalHit.textContent = String(result.retrieval_hit ?? 0);
   if (healthResponsePath) healthResponsePath.textContent = result.degraded ? "降级" : "标准";
 }
 
-function renderStoredMessages(messages) {
+function renderStoredMessages(messages, truncated = false) {
   clearChatDom();
+  if (truncated) {
+    appendChat(
+      "assistant",
+      '<p class="memory-notice">当前仅显示最近 200 条消息；更早内容仍保存在会话中，并由滚动摘要和相关记忆参与后续问答。</p>'
+    );
+  }
   if (!messages?.length) return;
   for (const m of messages) {
     if (m.role === "user") {
       appendChat("user", `<p>${escapeHtml(m.content || "")}</p>`);
     } else {
       const meta = m.meta || {};
-      appendChat(
+      const bubble = appendChat(
         "assistant",
         `${formatAnswerHtml(m.content || "")}
+         ${citationsHtml(m.citations)}
          <p class="bubble-meta">置信度 ${escapeHtml(meta.confidence || "N/A")} · 命中 ${meta.retrieval_hit ?? 0}</p>`
       );
+      bindCitationActions(bubble);
     }
   }
+}
+
+function updateMemoryControl(detail = null) {
+  if (!memoryToggleBtn) return;
+  const current =
+    detail || conversations.find((item) => item.id === activeConversationId);
+  if (!current) {
+    memoryToggleBtn.disabled = true;
+    memoryToggleBtn.textContent = "长记忆：—";
+    memoryToggleBtn.classList.remove("is-on");
+    memoryToggleBtn.title = "请先选择会话";
+    return;
+  }
+  activeConversationMemoryEnabled = current.memory_enabled !== false;
+  memoryToggleBtn.disabled = streaming;
+  memoryToggleBtn.textContent = activeConversationMemoryEnabled ? "长记忆：开" : "长记忆：关";
+  memoryToggleBtn.classList.toggle("is-on", activeConversationMemoryEnabled);
+  const revision = Number(current.memory_revision || 0);
+  const summarized = Number(current.summarized_message_count || 0);
+  const entries = Number(current.memory_entry_count || 0);
+  memoryToggleBtn.title = activeConversationMemoryEnabled
+    ? `已摘要至消息 ${summarized}；记忆版本 ${revision}；情景记忆 ${entries} 条`
+    : "长记忆已关闭，派生摘要和情景记忆已清除";
 }
 
 function renderConversationSelect() {
@@ -279,6 +386,7 @@ async function refreshConversations() {
     activeConversationId = "";
   }
   renderConversationSelect();
+  updateMemoryControl();
 }
 
 async function ensureConversation() {
@@ -289,6 +397,7 @@ async function ensureConversation() {
     json: { library_ids, title: "新对话" }
   });
   activeConversationId = conv.id;
+  activeConversationMemoryEnabled = conv.memory_enabled !== false;
   await refreshConversations();
   return activeConversationId;
 }
@@ -306,8 +415,9 @@ async function loadConversation(id) {
     selectedQueryLibraryIds = new Set(detail.library_ids.filter((x) => libraries.some((l) => l.id === x)));
     renderLibraries();
   }
-  renderStoredMessages(detail.messages || []);
+  renderStoredMessages(detail.messages || [], Boolean(detail.messages_truncated));
   renderConversationSelect();
+  updateMemoryControl(detail);
 }
 
 async function parseSseStream(resp, handlers) {
@@ -487,7 +597,13 @@ async function refreshHealth() {
   try {
     const h = await api("/api/health");
     if (healthLibraryState) {
-      healthLibraryState.textContent = h.database ? (h.has_api_key ? "可用" : "缺 Key") : "异常";
+      healthLibraryState.textContent = !h.database
+        ? "数据库异常"
+        : h.worker_alive === false
+          ? "Worker 离线"
+          : h.has_api_key
+            ? "可用"
+            : "缺 Key";
     }
   } catch {
     if (healthLibraryState) healthLibraryState.textContent = "离线";
@@ -664,15 +780,18 @@ ragQueryBtn?.addEventListener("click", async () => {
   ragQuestion.value = "";
   streaming = true;
   if (ragQueryBtn) ragQueryBtn.disabled = true;
+  updateMemoryControl();
 
   const bubble = appendChat(
     "assistant",
     `<p class="bubble-status is-active">正在检索并生成回答…</p>
      <div class="stream-text answer-body"></div>
+     <div class="stream-citations"></div>
      <p class="bubble-meta"></p>`
   );
   const statusEl = bubble.querySelector(".bubble-status");
   const textEl = bubble.querySelector(".stream-text");
+  const citationsEl = bubble.querySelector(".stream-citations");
   const metaEl = bubble.querySelector(".bubble-meta");
 
   const setBubbleStatus = (text, active = true) => {
@@ -726,6 +845,14 @@ ragQueryBtn?.addEventListener("click", async () => {
         if (data.retrieval_hit != null && healthRetrievalHit) {
           healthRetrievalHit.textContent = String(data.retrieval_hit);
         }
+        if (data.memory && memoryToggleBtn) {
+          const memory = data.memory;
+          const details = [];
+          if (memory.query_rewritten) details.push("已改写检索问题");
+          if (memory.summary_used) details.push("已使用滚动摘要");
+          if (memory.recalled_count) details.push(`召回 ${memory.recalled_count} 条旧记忆`);
+          if (details.length) memoryToggleBtn.title = details.join("；");
+        }
       },
       token: (data) => {
         if (answer === "" && statusEl) {
@@ -737,6 +864,10 @@ ragQueryBtn?.addEventListener("click", async () => {
       },
       citations: (data) => {
         setBubbleStatus("", false);
+        if (citationsEl) {
+          citationsEl.innerHTML = citationsHtml(data.citations || []);
+          bindCitationActions(citationsEl);
+        }
         if (metaEl) {
           metaEl.textContent = `置信度 ${data.confidence || "N/A"} · 命中 ${data.retrieval_hit ?? 0}`;
         }
@@ -761,6 +892,7 @@ ragQueryBtn?.addEventListener("click", async () => {
   } finally {
     streaming = false;
     updateQueryReady();
+    updateMemoryControl();
   }
 });
 
@@ -779,9 +911,38 @@ newConversationBtn?.addEventListener("click", async () => {
       json: { library_ids, title: "新对话" }
     });
     activeConversationId = conv.id;
+    activeConversationMemoryEnabled = conv.memory_enabled !== false;
     clearChatDom();
     await refreshConversations();
     setStatus("已新建对话。");
+  } catch (e) {
+    setStatus(e.message, true);
+  }
+});
+
+memoryToggleBtn?.addEventListener("click", async () => {
+  if (!activeConversationId || streaming) return;
+  try {
+    if (activeConversationMemoryEnabled) {
+      const approved = window.confirm(
+        "关闭长记忆会清除该会话派生的滚动摘要和情景记忆；原始聊天消息不会删除。是否继续？"
+      );
+      if (!approved) return;
+      await api(`/api/conversations/${activeConversationId}/memory`, {
+        method: "DELETE"
+      });
+      activeConversationMemoryEnabled = false;
+      setStatus("已关闭并清除该会话的派生长记忆；原始消息仍保留。");
+    } else {
+      await api(`/api/conversations/${activeConversationId}`, {
+        method: "PATCH",
+        json: { memory_enabled: true }
+      });
+      activeConversationMemoryEnabled = true;
+      setStatus("已开启长记忆，将在后续对话中自动建立摘要。");
+    }
+    await refreshConversations();
+    updateMemoryControl();
   } catch (e) {
     setStatus(e.message, true);
   }
@@ -804,6 +965,7 @@ ragClearChatBtn?.addEventListener("click", async () => {
       json: { library_ids, title: "新对话" }
     });
     activeConversationId = conv.id;
+    activeConversationMemoryEnabled = conv.memory_enabled !== false;
     clearChatDom();
     await refreshConversations();
     setStatus("已新开对话。");

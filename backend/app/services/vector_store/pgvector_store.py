@@ -23,6 +23,11 @@ def _cosine(a: list[float], b: list[float]) -> float:
     return dot / (na * nb)
 
 
+def _score_from_distance(distance: float | None) -> float:
+    distance_value = float(distance) if distance is not None else 1.0
+    return 1.0 - distance_value
+
+
 class PgVectorStore:
     def __init__(self, db: Session | None = None) -> None:
         self._db = db
@@ -80,7 +85,9 @@ class PgVectorStore:
         )
         out: list[VectorHit] = []
         for chunk, file_name, dist in db.execute(stmt).all():
-            score = 1.0 - float(dist or 1.0)
+            # A perfect cosine match has distance 0.0. Do not use ``or`` here:
+            # ``0.0 or 1.0`` would incorrectly turn an exact match into score 0.
+            score = _score_from_distance(dist)
             out.append(_hit(chunk, file_name, score))
         return out
 

@@ -1,0 +1,104 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      JWT_SECRET: ci-only-secret-at-least-24-characters
+      JWT_REQUIRE_STRONG: "0"
+      AUTH_EXPOSE_CODE: "1"
+      INDEX_RECOVER_ON_STARTUP: "0"
+      EMBEDDING_PROVIDER: local
+      OCR_ENABLED: "0"
+      OPENAI_API_KEY: ""
+      DATABASE_URL: sqlite:///./_ci.db
+      POSTGRES_PASSWORD: ci-postgres-password
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: backend/requirements.txt
+
+      - name: Install Python dependencies
+        run: python -m pip install -r backend/requirements.txt
+
+      - name: Run backend tests
+        working-directory: backend
+        run: python -m pytest -q
+
+      - name: Check frontend JavaScript syntax
+        run: node --check app.js
+
+      - name: Validate Compose configuration
+        run: |
+          cp .env.example .env
+          docker compose config --quiet
+
+  postgres-gate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_USER: paperpilot
+          POSTGRES_PASSWORD: postgres-gate-only
+          POSTGRES_DB: paperpilot_gate
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U paperpilot -d paperpilot_gate"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+    env:
+      DATABASE_URL: postgresql+psycopg2://paperpilot:postgres-gate-only@127.0.0.1:5432/paperpilot_gate
+      JWT_SECRET: ci-only-secret-at-least-24-characters
+      JWT_REQUIRE_STRONG: "0"
+      INDEX_RECOVER_ON_STARTUP: "0"
+      INDEX_EXTERNAL_WORKER: "1"
+      EMBEDDING_PROVIDER: local
+      EMBEDDING_DIMENSIONS: "1536"
+      POSTGRES_GATE_TEST: "1"
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: backend/requirements.txt
+
+      - name: Install Python dependencies
+        run: python -m pip install -r backend/requirements.txt
+
+      - name: Upgrade and verify PostgreSQL schema
+        working-directory: backend
+        run: |
+          python -m alembic -c alembic.ini upgrade head
+          python -m alembic -c alembic.ini check
+
+      - name: Run PostgreSQL worker gates
+        working-directory: backend
+        run: python -m pytest -q tests/test_postgres_worker_gate.py
+
+      - name: Build production image
+        run: docker build -t paperpilot-ci -f backend/Dockerfile .
+
+      - name: Verify OCR runtime libraries
+        run: >-
+          docker run --rm paperpilot-ci
+          python -c "import cv2; from rapidocr import RapidOCR; print(cv2.__version__)"

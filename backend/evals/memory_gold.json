@@ -1,0 +1,49 @@
+[
+  {
+    "id": "single_method_dataset",
+    "summary": "此前讨论 AlphaNet 的方法设计。",
+    "history": [
+      {"role": "user", "content": "请介绍论文中的 AlphaNet 方法。"},
+      {"role": "assistant", "content": "我们正在讨论 AlphaNet。"}
+    ],
+    "question": "它用了什么数据集？",
+    "required_terms": ["AlphaNet", "数据集"]
+  },
+  {
+    "id": "paper_limitation",
+    "summary": "用户正在精读 GraphRAG.pdf。",
+    "history": [
+      {"role": "user", "content": "请总结 GraphRAG.pdf 的主要贡献。"},
+      {"role": "assistant", "content": "已围绕 GraphRAG.pdf 的贡献回答。"}
+    ],
+    "question": "那篇的主要局限呢？",
+    "required_terms": ["GraphRAG", "局限"]
+  },
+  {
+    "id": "two_paper_experiment",
+    "summary": "此前比较 Paper-A.pdf 与 Paper-B.pdf。",
+    "history": [
+      {"role": "user", "content": "比较 Paper-A.pdf 和 Paper-B.pdf 的方法。"},
+      {"role": "assistant", "content": "已对两篇的方法作了对照。"}
+    ],
+    "question": "两者的实验设置有什么不同？",
+    "required_terms": ["Paper-A", "Paper-B", "实验设置"]
+  },
+  {
+    "id": "continue_scanned_pdf",
+    "summary": "用户关注 OCR-X 与 OCR-Y 对扫描论文的处理。",
+    "history": [
+      {"role": "user", "content": "OCR-X 和 OCR-Y 的解析流程有何区别？"},
+      {"role": "assistant", "content": "已比较 OCR-X 与 OCR-Y。"}
+    ],
+    "question": "继续比较它们在扫描件上的表现。",
+    "required_terms": ["OCR-X", "OCR-Y", "扫描件"]
+  },
+  {
+    "id": "standalone_question",
+    "summary": "",
+    "history": [],
+    "question": "Transformer 的注意力复杂度是多少？",
+    "required_terms": ["Transformer", "注意力复杂度"]
+  }
+]

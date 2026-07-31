@@ -27,6 +27,8 @@ class Settings(BaseSettings):
     openai_api_key: str = ""
     openai_base_url: str = "https://api.openai.com/v1"
     default_model: str = "gpt-4.1-mini"
+    # Optional comma-separated allowlist. Empty keeps custom OpenAI-compatible models available.
+    model_options: str = ""
     embedding_model: str = "text-embedding-3-small"
     embedding_dimensions: int = 1536
     # Separate embedding endpoint (e.g. Zhipu) while chat stays on DeepSeek
@@ -50,9 +52,37 @@ class Settings(BaseSettings):
     contextual_prefix_concurrency: int = 8
     rag_top_k: int = 6
     rag_min_similarity: float = 0.22
+    rag_prompt_max_chars: int = 32_000
+    rag_context_max_chars: int = 20_000
+    rag_inventory_max_chars: int = 5_000
+    rag_cards_max_chars: int = 5_000
+    rag_history_max_chars: int = 8_000
+    rag_tool_evidence_max_chars: int = 12_000
+    # Hierarchical conversation memory: recent turns + running summary +
+    # retrieved older episodes. Memory may resolve intent, never replace PDF
+    # evidence for factual answers.
+    conversation_memory_enabled: bool = True
+    memory_query_rewrite_enabled: bool = True
+    memory_semantic_recall_enabled: bool = True
+    memory_background_compaction_enabled: bool = True
+    memory_model: str = ""  # defaults to the request/default chat model
+    memory_summary_trigger_messages: int = 20
+    memory_summary_batch_messages: int = 8
+    memory_summary_max_chars: int = 6_000
+    memory_episode_max_chars: int = 4_000
+    memory_rewrite_history_max_chars: int = 6_000
+    memory_recall_top_k: int = 4
+    memory_recall_candidate_cap: int = 100
+    memory_recall_max_chars: int = 4_000
+    memory_recall_min_score: float = 0.18
+    # Guardrails against unbounded all-document prompts.
+    compare_max_documents: int = 12
+    inventory_prompt_max_documents: int = 50
 
     # Identical query answer cache (ms). 0 = disabled.
     response_cache_ttl_ms: int = 600_000
+    # Bump whenever answer/retrieval prompts change incompatibly.
+    prompt_version: str = "2026-07-31-memory-v1"
 
     rate_limit_window_seconds: int = 900
     rate_limit_auth_max: int = 30
@@ -69,6 +99,8 @@ class Settings(BaseSettings):
 
     # Comma-separated origins. Use your public site URL in production (not *).
     cors_origins: str = "*"
+    # Only these direct peers may supply X-Forwarded-For / X-Real-IP.
+    trusted_proxy_cidrs: str = "127.0.0.1/32,::1/128"
     health_verbose: bool = False
 
     # Auth: email verification via SMTP. Phone register off until SMS is wired.
@@ -109,12 +141,22 @@ class Settings(BaseSettings):
     # Sparse BM25 recall (in-process; lab-scale stand-in for ES)
     bm25_enabled: bool = True
     bm25_candidate_cap: int = 8000
+    postgres_trigram_enabled: bool = True
+    postgres_trigram_candidate_cap: int = 500
 
     # Vector backend abstraction: pgvector now; milvus/qdrant later
     vector_backend: str = "pgvector"
 
     # Durable index job queue (DB-backed async ingest)
     index_job_enabled: bool = True
+    # When true, API only enqueues; run `python -m app.worker` separately.
+    index_external_worker: bool = False
+    index_worker_poll_seconds: float = 2.0
+    index_worker_recovery_seconds: int = 60
+    index_worker_heartbeat_seconds: int = 15
+    index_worker_stale_seconds: int = 45
+    # A claimed job renews this lease while OCR / embedding is still running.
+    index_worker_lease_seconds: int = 90
 
     # L3 contextual retrieval + hybrid
     contextual_chunk_enabled: bool = True
@@ -156,6 +198,13 @@ class Settings(BaseSettings):
         }
         s = (self.jwt_secret or "").strip()
         return s.lower() in weak or len(s) < 24
+
+    def chat_model_is_allowed(self, model: str | None) -> bool:
+        requested = (model or "").strip()
+        if not requested:
+            return True
+        allowed = {m.strip() for m in self.model_options.split(",") if m.strip()}
+        return not allowed or requested in allowed
 
 
 @lru_cache

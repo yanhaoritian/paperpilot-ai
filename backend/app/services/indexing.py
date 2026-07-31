@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import logging
-from pathlib import Path
+import time
 
 from sqlalchemy.orm import Session
 
@@ -9,9 +9,16 @@ from app.config import get_settings
 from app.models import Block, Chunk, Document, DocumentStatus
 from app.services.acl import collection_key
 from app.services.doc_context import build_context_snapshot
-from app.services.index_jobs import mark_job_done, mark_job_failed, mark_job_running
+from app.services.document_storage import resolve_document_path
+from app.services.index_jobs import (
+    mark_job_done,
+    mark_job_failed,
+    mark_job_retrying,
+    mark_job_running,
+)
 from app.services.openai_client import embed_texts
 from app.services.pdf_parse import parse_pdf_pages
+from app.services.response_cache import query_cache
 from app.services.semantic_chunk import build_contextual_prefixes, chunks_from_blocks
 from app.services.structure import restore_structure
 
@@ -31,7 +38,7 @@ def index_document(db: Session, document_id: str) -> None:
     db.commit()
 
     try:
-        path = Path(doc.file_path)
+        path = resolve_document_path(doc)
         data = path.read_bytes()
         parse = parse_pdf_pages(data)
         if not parse.full_text.strip():
@@ -40,6 +47,7 @@ def index_document(db: Session, document_id: str) -> None:
             doc.page_count = parse.page_count
             db.commit()
             mark_job_failed(db, document_id, "EMPTY_TEXT")
+            query_cache().invalidate_owner(str(doc.owner_id))
             return
 
         blocks = restore_structure(parse, file_name=doc.file_name)
@@ -50,6 +58,7 @@ def index_document(db: Session, document_id: str) -> None:
             doc.page_count = parse.page_count
             db.commit()
             mark_job_failed(db, document_id, "NO_CHUNKS")
+            query_cache().invalidate_owner(str(doc.owner_id))
             return
 
         prefixes = build_contextual_prefixes(
@@ -115,6 +124,18 @@ def index_document(db: Session, document_id: str) -> None:
             detail_parts.append("ocr_used=1")
         if parse.vision_used:
             detail_parts.append("vision_used=1")
+        partial = False
+        if parse.empty_pages:
+            detail_parts.append(f"empty_pages={parse.empty_pages}")
+            partial = True
+        if parse.empty_pages_after_ocr_cap:
+            detail_parts.append(f"empty_after_ocr_cap={parse.empty_pages_after_ocr_cap}")
+            partial = True
+        if len(chunks) >= settings.max_chunks:
+            detail_parts.append(f"chunk_cap_reached={settings.max_chunks}")
+            partial = True
+        if partial:
+            detail_parts.append("partial_index=1")
         doc.context_snapshot = build_context_snapshot(
             file_name=doc.file_name,
             page_count=parse.page_count,
@@ -127,6 +148,7 @@ def index_document(db: Session, document_id: str) -> None:
         doc.page_count = parse.page_count
         db.commit()
         mark_job_done(db, document_id)
+        query_cache().invalidate_owner(str(doc.owner_id))
         logger.info(
             "indexed document %s chunks=%s blocks=%s attempts=%s routes=%s emb=%s@%s",
             doc.id,
@@ -150,4 +172,31 @@ def index_document(db: Session, document_id: str) -> None:
                 doc.status = DocumentStatus.failed.value
                 doc.status_detail = detail
             db.commit()
-            mark_job_failed(db, document_id, detail)
+            if doc.status == DocumentStatus.pending.value:
+                mark_job_retrying(db, document_id, detail)
+            else:
+                mark_job_failed(db, document_id, detail)
+            query_cache().invalidate_owner(str(doc.owner_id))
+
+
+def index_document_with_retries(db: Session, document_id: str) -> None:
+    """Run one durable job until it succeeds or reaches its configured attempt cap."""
+    settings = get_settings()
+    while True:
+        index_document(db, document_id)
+        db.expire_all()
+        doc = db.get(Document, document_id)
+        if not doc:
+            return
+        attempts = int(doc.index_attempts or 0)
+        if doc.status != DocumentStatus.pending.value or attempts >= settings.index_max_attempts:
+            return
+        delay = min(8.0, float(2 ** max(0, attempts - 1)))
+        logger.warning(
+            "retrying document %s attempt=%s/%s in %.1fs",
+            document_id,
+            attempts + 1,
+            settings.index_max_attempts,
+            delay,
+        )
+        time.sleep(delay)

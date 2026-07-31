@@ -2,13 +2,27 @@ from datetime import datetime
 from enum import Enum
 from uuid import uuid4
 
-from sqlalchemy import JSON, DateTime, ForeignKey, Integer, String, Text, UniqueConstraint, func
+from sqlalchemy import (
+    Boolean,
+    JSON,
+    DateTime,
+    Float,
+    ForeignKey,
+    Index,
+    Integer,
+    String,
+    Text,
+    UniqueConstraint,
+    func,
+)
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.config import get_settings
 from app.db import Base
 
 settings = get_settings()
+JsonStorageType = JSON().with_variant(JSONB(), "postgresql")
 
 if settings.is_sqlite:
     EmbeddingType = JSON
@@ -104,7 +118,7 @@ class Document(Base):
     page_count: Mapped[int] = mapped_column(Integer, default=0)
     index_attempts: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     # Per-document durable context card (title/preview/sections) for multi-doc QA
-    context_snapshot = mapped_column(JSON, nullable=True)
+    context_snapshot = mapped_column(JsonStorageType, nullable=True)
     embedding_model: Mapped[str | None] = mapped_column(String(128), nullable=True)
     embedding_version: Mapped[str | None] = mapped_column(String(32), nullable=True, index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
@@ -131,14 +145,17 @@ class Block(Base):
     page_start: Mapped[int | None] = mapped_column(Integer, nullable=True)
     page_end: Mapped[int | None] = mapped_column(Integer, nullable=True)
     section_path: Mapped[str | None] = mapped_column(String(512), nullable=True)
-    bbox = mapped_column(JSON, nullable=True)
-    extra = mapped_column(JSON, nullable=True)
+    bbox = mapped_column(JsonStorageType, nullable=True)
+    extra = mapped_column(JsonStorageType, nullable=True)
 
     document: Mapped["Document"] = relationship(back_populates="blocks")
 
 
 class Chunk(Base):
     __tablename__ = "chunks"
+    __table_args__ = (
+        Index("ix_chunks_owner_library", "owner_id", "library_id"),
+    )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid4()))
     document_id: Mapped[str] = mapped_column(String(36), ForeignKey("documents.id", ondelete="CASCADE"), index=True)
@@ -151,8 +168,8 @@ class Chunk(Base):
     section_path: Mapped[str | None] = mapped_column(String(512), nullable=True)
     role: Mapped[str | None] = mapped_column(String(32), nullable=True)
     context_prefix: Mapped[str | None] = mapped_column(Text, nullable=True)
-    block_ids = mapped_column(JSON, nullable=True)
-    extra = mapped_column(JSON, nullable=True)
+    block_ids = mapped_column(JsonStorageType, nullable=True)
+    extra = mapped_column(JsonStorageType, nullable=True)
     # Logical collection key: owner_id:library_id (enterprise multi-tenant mental model)
     collection_key: Mapped[str | None] = mapped_column(String(128), nullable=True, index=True)
     embedding_model: Mapped[str | None] = mapped_column(String(128), nullable=True)
@@ -180,6 +197,28 @@ class IndexJob(Base):
     )
     started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    lease_owner: Mapped[str | None] = mapped_column(String(128), nullable=True, index=True)
+    lease_expires_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+        index=True,
+    )
+
+
+class WorkerHeartbeat(Base):
+    """Liveness record for independently deployed background workers."""
+
+    __tablename__ = "worker_heartbeats"
+
+    worker_id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    worker_kind: Mapped[str] = mapped_column(String(32), default="index", index=True)
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    last_seen_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        index=True,
+    )
+    extra = mapped_column(JsonStorageType, nullable=True)
 
 
 class Conversation(Base):
@@ -188,7 +227,15 @@ class Conversation(Base):
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid4()))
     owner_id: Mapped[str] = mapped_column(String(36), ForeignKey("users.id", ondelete="CASCADE"), index=True)
     title: Mapped[str] = mapped_column(String(200), default="新对话", nullable=False)
-    library_ids = mapped_column(JSON, nullable=False, default=lambda: [])
+    library_ids = mapped_column(JsonStorageType, nullable=False, default=lambda: [])
+    memory_enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    memory_summary: Mapped[str | None] = mapped_column(Text, nullable=True)
+    summarized_message_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    memory_revision: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    memory_updated_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=True
@@ -196,21 +243,102 @@ class Conversation(Base):
 
     owner: Mapped["User"] = relationship(back_populates="conversations")
     messages: Mapped[list["Message"]] = relationship(
-        back_populates="conversation", cascade="all, delete-orphan", order_by="Message.created_at"
+        back_populates="conversation",
+        cascade="all, delete-orphan",
+        order_by="Message.sequence",
+    )
+    memories: Mapped[list["ConversationMemory"]] = relationship(
+        back_populates="conversation",
+        cascade="all, delete-orphan",
+        order_by="ConversationMemory.created_at",
     )
 
 
 class Message(Base):
     __tablename__ = "messages"
+    __table_args__ = (
+        Index(
+            "uq_messages_conversation_sequence",
+            "conversation_id",
+            "sequence",
+            unique=True,
+        ),
+    )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=lambda: str(uuid4()))
     conversation_id: Mapped[str] = mapped_column(
         String(36), ForeignKey("conversations.id", ondelete="CASCADE"), index=True
     )
+    sequence: Mapped[int] = mapped_column(Integer, nullable=False)
     role: Mapped[str] = mapped_column(String(16), nullable=False)  # user | assistant
     content: Mapped[str] = mapped_column(Text, nullable=False, default="")
-    citations = mapped_column(JSON, nullable=True)
-    extra = mapped_column("extra", JSON, nullable=True)
+    citations = mapped_column(JsonStorageType, nullable=True)
+    extra = mapped_column("extra", JsonStorageType, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
     conversation: Mapped["Conversation"] = relationship(back_populates="messages")
+
+
+class ConversationMemory(Base):
+    """A compacted, retrievable episode from older conversation turns."""
+
+    __tablename__ = "conversation_memories"
+    __table_args__ = (
+        UniqueConstraint(
+            "conversation_id",
+            "source_start_index",
+            "source_end_index",
+            name="uq_conversation_memory_range",
+        ),
+        Index(
+            "ix_conversation_memories_owner_conversation",
+            "owner_id",
+            "conversation_id",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(
+        String(36),
+        primary_key=True,
+        default=lambda: str(uuid4()),
+    )
+    owner_id: Mapped[str] = mapped_column(
+        String(36),
+        ForeignKey("users.id", ondelete="CASCADE"),
+        index=True,
+        nullable=False,
+    )
+    conversation_id: Mapped[str] = mapped_column(
+        String(36),
+        ForeignKey("conversations.id", ondelete="CASCADE"),
+        index=True,
+        nullable=False,
+    )
+    kind: Mapped[str] = mapped_column(
+        String(32),
+        default="episode",
+        nullable=False,
+    )
+    content: Mapped[str] = mapped_column(Text, nullable=False)
+    source_start_index: Mapped[int] = mapped_column(Integer, nullable=False)
+    source_end_index: Mapped[int] = mapped_column(Integer, nullable=False)
+    importance: Mapped[float] = mapped_column(Float, default=0.5, nullable=False)
+    embedding_model: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    embedding_version: Mapped[str | None] = mapped_column(
+        String(32),
+        nullable=True,
+        index=True,
+    )
+    embedding = mapped_column(EmbeddingType, nullable=True)
+    extra = mapped_column(JsonStorageType, nullable=True)
+    access_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    last_accessed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+    )
+
+    conversation: Mapped["Conversation"] = relationship(back_populates="memories")

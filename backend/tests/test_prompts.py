@@ -1,6 +1,15 @@
 from __future__ import annotations
 
-from app.services.generate import build_rag_messages, build_rag_stream_messages
+from app.services.generate import (
+    _format_context_grouped,
+    build_rag_messages,
+    build_rag_stream_messages,
+)
+from app.services.conversation_memory import (
+    ConversationContext,
+    RecalledMemory,
+)
+from app.services.prompt_budget import budget_history
 from app.services.prompts import RAG_AGENT_FINAL_SYSTEM, RAG_EVIDENCE_POLICY, RAG_JSON_SYSTEM, RAG_STREAM_SYSTEM
 from app.services.retrieve import RetrievedChunk
 
@@ -93,3 +102,74 @@ def test_build_rag_stream_messages_includes_history_and_policy():
     assert "paper_a.pdf" in msgs[3]["content"]
     assert "章节=Methods" in msgs[3]["content"]
     assert "覆盖的文献文件" in msgs[3]["content"]
+
+
+def test_stream_messages_label_memory_as_non_evidence():
+    rows = [_chunk()]
+    context = ConversationContext(
+        retrieval_query="AlphaNet 使用什么数据集？",
+        enabled=True,
+        query_rewritten=True,
+        summary="此前讨论 AlphaNet。",
+        recalled=(
+            RecalledMemory(
+                id="m1",
+                content="用户曾追问 AlphaNet 的训练设置。",
+                score=0.9,
+                source_start_index=1,
+                source_end_index=4,
+            ),
+        ),
+    )
+    msgs = build_rag_stream_messages(
+        "它用了什么数据集？",
+        rows,
+        history=[{"role": "user", "content": "继续前面的问题"}],
+        conversation_context=context,
+    )
+    memory_message = msgs[1]
+    assert memory_message["role"] == "system"
+    assert "不属于论文证据" in memory_message["content"]
+    assert "AlphaNet" in memory_message["content"]
+
+
+def test_context_budget_preserves_each_document_entry():
+    rows = [
+        _chunk(
+            chunk_id=f"c{i}",
+            document_id=f"d{i}",
+            file_name=f"paper_{i}.pdf",
+            text=("证据" * 1000),
+            score=1.0 / i,
+        )
+        for i in range(1, 4)
+    ]
+    context = _format_context_grouped(
+        rows,
+        include_ids=True,
+        max_chars=1800,
+    )
+    assert len(context) <= 1800
+    for i in range(1, 4):
+        assert f"paper_{i}.pdf" in context
+
+
+def test_history_budget_keeps_newest_turns():
+    history = [
+        {"role": "user", "content": "旧问题" * 100},
+        {"role": "assistant", "content": "旧回答" * 100},
+        {"role": "user", "content": "最新问题"},
+    ]
+    selected = budget_history(history, 30)
+    assert selected[-1]["content"] == "最新问题"
+    assert sum(len(turn["content"]) for turn in selected) <= 30
+
+
+def test_history_budget_does_not_orphan_assistant_from_user():
+    history = [
+        {"role": "user", "content": "旧问题" * 100},
+        {"role": "assistant", "content": "旧回答" * 100},
+    ]
+    selected = budget_history(history, 80)
+    assert [turn["role"] for turn in selected] == ["user", "assistant"]
+    assert sum(len(turn["content"]) for turn in selected) <= 80

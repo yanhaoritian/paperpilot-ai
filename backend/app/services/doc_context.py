@@ -19,7 +19,14 @@ def build_context_snapshot(
     max_preview_chars: int = 1400,
 ) -> dict[str, Any]:
     """Build a compact card from structured blocks (title/abstract/early paragraphs)."""
-    role_priority = {"title": 0, "abstract": 1, "section": 2, "paragraph": 3, "caption": 4}
+    role_priority = {
+        "title": 0,
+        "abstract": 1,
+        "section_heading": 2,
+        "section": 2,  # legacy rows
+        "paragraph": 3,
+        "caption": 4,
+    }
     ordered = sorted(
         blocks,
         key=lambda b: (
@@ -37,9 +44,12 @@ def build_context_snapshot(
             continue
         if role not in roles_used:
             roles_used.append(role)
-        if role == "section" and len(sections) < 12:
+        if role in {"section_heading", "section"} and len(sections) < 12:
             sections.append(text[:120])
-        if role in {"title", "abstract", "paragraph", "section"} and sum(len(p) for p in preview_parts) < max_preview_chars:
+        if (
+            role in {"title", "abstract", "paragraph", "section_heading", "section"}
+            and sum(len(p) for p in preview_parts) < max_preview_chars
+        ):
             preview_parts.append(f"[{role}] {text[:500]}")
         if sum(len(p) for p in preview_parts) >= max_preview_chars:
             break

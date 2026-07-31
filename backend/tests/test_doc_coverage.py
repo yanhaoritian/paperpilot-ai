@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 from app.services.doc_context import build_context_snapshot, format_document_context_cards
-from app.services.hybrid_retrieve import rerank_chunks
+from app.services.hybrid_retrieve import _best_chunk_for_document, rerank_chunks
 from app.services.retrieve import RetrievedChunk
 from app.models import Document
 
@@ -34,7 +36,7 @@ def test_build_context_snapshot_from_blocks():
         blocks=[
             _B("title", "申扎裂谷研究"),
             _B("abstract", "本文基于深反射数据…"),
-            _B("section", "1 引言"),
+            _B("section_heading", "1 引言"),
             _B("paragraph", "方法细节……"),
         ],
     )
@@ -82,3 +84,37 @@ def test_format_document_context_cards():
     assert "文献 Context 卡片" in text
     assert "a.pdf" in text
     assert "hello" in text
+
+
+def test_document_coverage_fallback_keeps_filename_column():
+    chunk = SimpleNamespace(
+        id="c1",
+        document_id="d1",
+        library_id="l1",
+        text="目标证据",
+        page_start=2,
+        page_end=2,
+        chunk_index=0,
+        embedding=None,
+        section_path="Results",
+        role="paragraph",
+    )
+
+    class _Rows:
+        def all(self):
+            return [(chunk, "paper.pdf")]
+
+    class _Session:
+        def execute(self, _statement):
+            return _Rows()
+
+    result = _best_chunk_for_document(
+        _Session(),
+        owner_id="u1",
+        document_id="d1",
+        question="目标证据",
+        q_vec=None,
+    )
+    assert result is not None
+    assert result.file_name == "paper.pdf"
+    assert result.chunk_id == "c1"
