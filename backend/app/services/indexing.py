@@ -21,13 +21,32 @@ from app.services.pdf_parse import parse_pdf_pages
 from app.services.response_cache import query_cache
 from app.services.semantic_chunk import build_contextual_prefixes, chunks_from_blocks
 from app.services.structure import restore_structure
+from app.services.usage_tracking import usage_scope
 
 logger = logging.getLogger(__name__)
 
 
 def index_document(db: Session, document_id: str) -> None:
-    settings = get_settings()
     doc = db.get(Document, document_id)
+    if not doc:
+        return
+    attempt = int(doc.index_attempts or 0) + 1
+    with usage_scope(
+        request_id=f"index:{document_id}:{attempt}",
+        user_id=str(doc.owner_id),
+        document_id=str(doc.id),
+    ):
+        _index_document_scoped(db, document_id, doc=doc)
+
+
+def _index_document_scoped(
+    db: Session,
+    document_id: str,
+    *,
+    doc: Document | None = None,
+) -> None:
+    settings = get_settings()
+    doc = doc or db.get(Document, document_id)
     if not doc:
         return
 
@@ -70,7 +89,7 @@ def index_document(db: Session, document_id: str) -> None:
             f"{pref}{c['text']}" if pref else c["text"]
             for pref, c in zip(prefixes, chunks, strict=True)
         ]
-        embeddings = embed_texts(embed_inputs)
+        embeddings = embed_texts(embed_inputs, operation="document_embedding")
         coll = collection_key(str(doc.owner_id), str(doc.library_id))
         emb_model = settings.embedding_model
         emb_ver = settings.embedding_version

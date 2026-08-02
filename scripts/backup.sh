@@ -47,7 +47,7 @@ if command -v docker >/dev/null 2>&1 \
   sha256sum "$DB_DUMP" > "$DEST/database-manifest.sha256"
   {
     echo "table,count"
-    for table in auth_codes blocks chunks conversation_memories conversations documents index_jobs libraries messages usage_daily users worker_heartbeats; do
+    for table in ai_usage_events auth_codes blocks chunks conversation_memories conversations documents index_jobs libraries messages model_price_versions usage_daily users worker_heartbeats; do
       exists="$(
         docker compose -f "$ROOT/docker-compose.yml" exec -T db \
           psql -U paperpilot -d paperpilot -At \

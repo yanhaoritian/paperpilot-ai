@@ -51,7 +51,7 @@ def retrieve_chunks(
     q_vec = (
         query_vector
         if query_vector is not None
-        else embed_texts([question])[0]
+        else embed_texts([question], operation="query_embedding")[0]
     )
     k = top_k or settings.rag_top_k
     min_sim = settings.rag_min_similarity if min_similarity is None else min_similarity

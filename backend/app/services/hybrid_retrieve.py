@@ -249,7 +249,7 @@ def rerank_chunks(
                 },
                 {"role": "user", "content": str(payload)},
             ]
-            raw = chat_json(messages, temperature=0.0)
+            raw = chat_json(messages, temperature=0.0, operation="rerank")
             ids = raw.get("ordered_ids") if isinstance(raw.get("ordered_ids"), list) else []
             by_id = {r.chunk_id: r for r in rows}
             ordered: list[RetrievedChunk] = []
@@ -388,7 +388,7 @@ def hybrid_retrieve(
     q_vec = (
         query_vector
         if query_vector is not None
-        else embed_texts([question])[0]
+        else embed_texts([question], operation="query_embedding")[0]
     )
     if not settings.hybrid_recall_enabled:
         from app.services.retrieve import retrieve_chunks

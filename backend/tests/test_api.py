@@ -69,6 +69,55 @@ def test_register_with_email_code_and_login(client: TestClient):
     assert login.status_code == 200
 
 
+def test_research_skills_and_usage_summary_are_user_scoped(client: TestClient):
+    email = f"research_{uuid.uuid4().hex[:8]}@example.com"
+    code = client.post(
+        "/api/auth/send-code",
+        json={"channel": "email", "target": email},
+    ).json()["dev_code"]
+    token = client.post(
+        "/api/auth/register",
+        json={
+            "username": f"research_{uuid.uuid4().hex[:6]}",
+            "password": "secret12",
+            "code": code,
+            "channel": "email",
+            "email": email,
+        },
+    ).json()["access_token"]
+    headers = {"Authorization": f"Bearer {token}"}
+    user_id = client.get("/api/auth/me", headers=headers).json()["id"]
+
+    from app.services.usage_tracking import record_ai_usage, usage_scope
+
+    with usage_scope(user_id=user_id, skill_id="paper_qa"):
+        record_ai_usage(
+            operation="answer_generate",
+            provider=f"api-test-{uuid.uuid4().hex[:6]}",
+            model="test-model",
+            input_tokens=10,
+            output_tokens=2,
+            total_tokens=12,
+        )
+
+    skills = client.get("/api/research/skills", headers=headers)
+    assert skills.status_code == 200, skills.text
+    ids = {row["id"] for row in skills.json()}
+    assert "paper_qa" in ids
+    assert "multi_paper_synthesis" in ids
+
+    usage = client.get("/api/research/usage?days=30", headers=headers)
+    assert usage.status_code == 200, usage.text
+    payload = usage.json()
+    assert payload["total_tokens"] == 12
+    assert payload["provider_reported_events"] == 1
+    assert payload["local_events"] == 0
+    assert payload["failed_events"] == 0
+    assert payload["unpriced_events"] == 1
+    assert payload["costs"] == []
+    assert payload["by_skill"][0]["key"] == "paper_qa"
+
+
 def test_library_isolation(client: TestClient):
     def make_user(tag: str):
         email = f"{tag}_{uuid.uuid4().hex[:6]}@example.com"

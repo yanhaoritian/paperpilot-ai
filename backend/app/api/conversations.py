@@ -4,7 +4,7 @@ import json
 from collections.abc import Iterator
 from datetime import datetime, timezone
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, status
 from fastapi.responses import StreamingResponse
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
@@ -41,6 +41,11 @@ from app.services.conversation_memory import (
     clear_conversation_memory,
     refresh_conversation_memory,
 )
+from app.services.research_skills import (
+    resolve_research_skill,
+    validate_skill_answer,
+)
+from app.services.usage_tracking import record_cache_hit, usage_scope
 
 router = APIRouter(prefix="/api/conversations", tags=["conversations"])
 
@@ -225,6 +230,7 @@ def _sse(event: str, data: dict) -> str:
 def post_message_stream(
     conversation_id: str,
     body: ConversationMessageRequest,
+    request: Request,
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> StreamingResponse:
@@ -239,7 +245,15 @@ def post_message_stream(
     if not settings.chat_model_is_allowed(body.model):
         raise HTTPException(status_code=400, detail="所选模型不在服务端允许列表中")
     intent = detect_intent(question)
-    if intent == QueryIntent.COMPARE:
+    try:
+        skill = resolve_research_skill(
+            body.skill_id,
+            question=question,
+            intent=intent,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if intent == QueryIntent.COMPARE or skill.cover_all_documents:
         ready_count = int(
             db.scalar(
                 select(func.count())
@@ -276,7 +290,11 @@ def post_message_stream(
         sequence=next_sequence,
         role="user",
         content=question,
-        extra={"library_ids": library_ids},
+        extra={
+            "library_ids": library_ids,
+            "skill_id": skill.id,
+            "skill_version": skill.version,
+        },
     )
     db.add(user_msg)
     if conv.title == "新对话":
@@ -332,6 +350,8 @@ def post_message_stream(
             history_fingerprint="",
             corpus_revision=revision,
             prompt_version=settings.prompt_version,
+            skill_id=skill.id,
+            skill_version=skill.version,
         )
         hit = query_cache().get(cache_key)
         if isinstance(hit, dict) and hit.get("answer"):
@@ -350,6 +370,8 @@ def post_message_stream(
             "streaming": True,
             "cache_hit": bool(cached_final),
             "library_ids": library_ids,
+            "skill_id": skill.id,
+            "skill_version": skill.version,
         },
     )
     db.add(assistant)
@@ -368,6 +390,12 @@ def post_message_stream(
     memory_active = bool(
         settings.conversation_memory_enabled and conv.memory_enabled
     )
+    request_id = getattr(request.state, "request_id", None)
+    skill_id = skill.id
+    skill_version = skill.version
+    skill_title = skill.title
+    skill_prompt = skill.system_prompt()
+    force_document_coverage = bool(skill.cover_all_documents)
 
     def event_gen() -> Iterator[str]:
         yield _sse(
@@ -377,6 +405,11 @@ def post_message_stream(
                 "message_id": assistant_id,
                 "user_message_id": user_msg_id,
                 "cache_hit": bool(cached_final),
+                "skill": {
+                    "id": skill_id,
+                    "version": skill_version,
+                    "title": skill_title,
+                },
             },
         )
         final_payload: dict = {
@@ -389,6 +422,18 @@ def post_message_stream(
         parts: list[str] = []
 
         if cached_final is not None:
+            with usage_scope(
+                request_id=request_id,
+                user_id=owner_id,
+                conversation_id=conv_id,
+                message_id=assistant_id,
+                skill_id=skill_id,
+                skill_version=skill_version,
+            ) as attribution:
+                record_cache_hit(
+                    model=model or settings.default_model,
+                    attribution=attribution,
+                )
             answer = str(cached_final.get("answer") or "")
             # Replay as coarse tokens so the UI still streams.
             step = max(24, len(answer) // 40 or 24)
@@ -402,30 +447,43 @@ def post_message_stream(
                 "retrieval_hit": int(cached_final.get("retrieval_hit") or 0),
                 "degraded": bool(cached_final.get("degraded")),
                 "confidence": cached_final.get("confidence") or "medium",
+                "skill_id": skill_id,
+                "skill_version": skill_version,
+                "skill_validation": cached_final.get("skill_validation"),
             }
         else:
             work = SessionLocal()
             try:
-                for event, data in iter_agent_events(
-                    work,
-                    owner_id=owner_id,
+                with usage_scope(
+                    request_id=request_id,
+                    user_id=owner_id,
                     conversation_id=conv_id,
-                    library_ids=library_ids,
-                    question=question,
-                    history=history,
-                    model=model,
-                    temperature=temperature,
+                    message_id=assistant_id,
+                    skill_id=skill_id,
+                    skill_version=skill_version,
                 ):
-                    if event == "token":
-                        text = str(data.get("text") or "")
-                        parts.append(text)
-                        yield _sse("token", {"text": text})
-                    elif event == "final":
-                        final_payload = data
-                    elif event in {"status", "tool", "meta", "error"}:
-                        yield _sse(event, data)
-                    else:
-                        yield _sse(event, data)
+                    for event, data in iter_agent_events(
+                        work,
+                        owner_id=owner_id,
+                        conversation_id=conv_id,
+                        library_ids=library_ids,
+                        question=question,
+                        history=history,
+                        model=model,
+                        temperature=temperature,
+                        skill_prompt=skill_prompt,
+                        force_document_coverage=force_document_coverage,
+                    ):
+                        if event == "token":
+                            text = str(data.get("text") or "")
+                            parts.append(text)
+                            yield _sse("token", {"text": text})
+                        elif event == "final":
+                            final_payload = data
+                        elif event in {"status", "tool", "meta", "error"}:
+                            yield _sse(event, data)
+                        else:
+                            yield _sse(event, data)
             except Exception as exc:  # noqa: BLE001
                 err = f"生成失败：{exc}"
                 if not parts:
@@ -442,21 +500,37 @@ def post_message_stream(
             finally:
                 work.close()
 
-            if cacheable and cache_key and not final_payload.get("degraded"):
-                query_cache().set(
-                    cache_key,
-                    {
-                        "answer": str(final_payload.get("answer") or "".join(parts)),
-                        "citations": final_payload.get("citations") or [],
-                        "retrieval_hit": int(final_payload.get("retrieval_hit") or 0),
-                        "degraded": bool(final_payload.get("degraded")),
-                        "confidence": final_payload.get("confidence") or "medium",
-                    },
-                    ttl_ms=ttl_ms,
-                )
-
         answer = str(final_payload.get("answer") or "".join(parts)).strip() or "无法从文献中得出可靠结论。"
         citations = final_payload.get("citations") or []
+        skill_validation = final_payload.get("skill_validation") or validate_skill_answer(
+            skill,
+            answer=answer,
+            citations=citations,
+            degraded=bool(final_payload.get("degraded")),
+        )
+        final_payload["skill_id"] = skill_id
+        final_payload["skill_version"] = skill_version
+        final_payload["skill_validation"] = skill_validation
+        if (
+            cached_final is None
+            and cacheable
+            and cache_key
+            and not final_payload.get("degraded")
+        ):
+            query_cache().set(
+                cache_key,
+                {
+                    "answer": answer,
+                    "citations": citations,
+                    "retrieval_hit": int(final_payload.get("retrieval_hit") or 0),
+                    "degraded": bool(final_payload.get("degraded")),
+                    "confidence": final_payload.get("confidence") or "medium",
+                    "skill_id": skill_id,
+                    "skill_version": skill_version,
+                    "skill_validation": skill_validation,
+                },
+                ttl_ms=ttl_ms,
+            )
         yield _sse(
             "citations",
             {
@@ -465,6 +539,12 @@ def post_message_stream(
                 "degraded": bool(final_payload.get("degraded")),
                 "out_of_scope": False,
                 "retrieval_hit": int(final_payload.get("retrieval_hit") or 0),
+                "skill": {
+                    "id": skill_id,
+                    "version": skill_version,
+                    "title": skill_title,
+                    "validation": skill_validation,
+                },
             },
         )
         _finalize_assistant(
@@ -477,6 +557,10 @@ def post_message_stream(
                 "retrieval_hit": int(final_payload.get("retrieval_hit") or 0),
                 "cache_hit": bool(cached_final),
                 "library_ids": library_ids,
+                "skill_id": skill_id,
+                "skill_version": skill_version,
+                "skill_title": skill_title,
+                "skill_validation": skill_validation,
                 "memory": final_payload.get("memory") or {
                     "enabled": memory_active
                 },
@@ -504,6 +588,10 @@ def post_message_stream(
             conv_id,
             owner_id,
             model=model,
+            request_id=request_id,
+            message_id=assistant_id,
+            skill_id=skill_id,
+            skill_version=skill_version,
         ),
     )
 

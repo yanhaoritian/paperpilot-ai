@@ -409,7 +409,7 @@ def plan_followup_tools(
                 ),
             },
         ]
-        raw = chat_json(messages, temperature=0.1)
+        raw = chat_json(messages, temperature=0.1, operation="agent_plan")
         steps = raw.get("steps") if isinstance(raw.get("steps"), list) else []
         cleaned: list[dict[str, Any]] = []
         for step in steps[:remaining_steps]:
@@ -469,6 +469,8 @@ def iter_agent_events(
     history: list[dict[str, str]] | None = None,
     model: str | None = None,
     temperature: float = 0.2,
+    skill_prompt: str | None = None,
+    force_document_coverage: bool = False,
 ) -> Iterator[tuple[str, dict[str, Any]]]:
     """Yield (event_name, payload). Final event is 'final' with answer/citations meta."""
     settings = get_settings()
@@ -513,8 +515,9 @@ def iter_agent_events(
         max_items=settings.inventory_prompt_max_documents,
     )
     compare = intent == QueryIntent.COMPARE
+    cover_documents = compare or force_document_coverage
     cards_text = None
-    if compare or len(inventory) <= 3:
+    if cover_documents or len(inventory) <= 3:
         cards = ensure_document_snapshots(db, owner_id=owner_id, library_ids=library_ids)
         cards_text = format_document_context_cards(cards)
 
@@ -536,7 +539,7 @@ def iter_agent_events(
         return
 
     ready_count = sum(1 for item in inventory if item.status == "ready")
-    if compare and ready_count > settings.compare_max_documents:
+    if cover_documents and ready_count > settings.compare_max_documents:
         ans = (
             f"当前选择中有 {ready_count} 篇可检索文献，超过单次全量对比上限 "
             f"{settings.compare_max_documents} 篇。请缩小知识库范围后再进行全量对比。"
@@ -556,13 +559,13 @@ def iter_agent_events(
         return
 
     # Compare / small libraries: hybrid + full-doc coverage (skip agent tool planner)
-    use_hybrid = (not settings.agent_enabled) or compare or len(inventory) <= 3
+    use_hybrid = (not settings.agent_enabled) or cover_documents or len(inventory) <= 3
     if use_hybrid:
         yield (
             "status",
             {
                 "phase": "retrieving",
-                "text": "正在混合检索（多文献覆盖）…" if compare else "正在混合检索…",
+                "text": "正在混合检索（多文献覆盖）…" if cover_documents else "正在混合检索…",
             },
         )
         rows = hybrid_retrieve(
@@ -570,8 +573,8 @@ def iter_agent_events(
             owner_id=owner_id,
             library_ids=library_ids,
             question=retrieval_question,
-            cover_all_docs=compare or len(inventory) <= 3,
-            top_k=max(settings.rag_top_k, 8) if compare else None,
+            cover_all_docs=cover_documents or len(inventory) <= 3,
+            top_k=max(settings.rag_top_k, 8) if cover_documents else None,
             query_vector=conversation_context.query_vector,
         )
         if not rows:
@@ -611,9 +614,15 @@ def iter_agent_events(
             inventory_text=inventory_text,
             document_cards_text=cards_text,
             intent_hint=intent_hint,
+            skill_prompt=skill_prompt,
         )
         parts: list[str] = []
-        for tok in chat_stream(messages, model=model, temperature=temperature):
+        for tok in chat_stream(
+            messages,
+            model=model,
+            temperature=temperature,
+            operation="answer_generate",
+        ):
             parts.append(tok)
             yield ("token", {"text": tok})
         answer = "".join(parts).strip()
@@ -736,7 +745,10 @@ def iter_agent_events(
         return
 
     yield ("status", {"phase": "generating", "text": "正在根据工具证据生成回答…"})
-    messages: list[dict[str, str]] = [{"role": "system", "content": RAG_AGENT_FINAL_SYSTEM}]
+    agent_system = RAG_AGENT_FINAL_SYSTEM
+    if skill_prompt:
+        agent_system = f"{agent_system}\n\n{skill_prompt.strip()}"
+    messages: list[dict[str, str]] = [{"role": "system", "content": agent_system}]
     memory_text = format_conversation_context(
         conversation_context,
         max_chars=int(settings.memory_recall_max_chars),
@@ -759,7 +771,12 @@ def iter_agent_events(
         }
     )
     parts = []
-    for tok in chat_stream(messages, model=model, temperature=temperature):
+    for tok in chat_stream(
+        messages,
+        model=model,
+        temperature=temperature,
+        operation="answer_generate",
+    ):
         parts.append(tok)
         yield ("token", {"text": tok})
     answer = "".join(parts).strip() or "无法从文献中得出可靠结论。"

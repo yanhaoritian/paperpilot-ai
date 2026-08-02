@@ -3,6 +3,7 @@ from enum import Enum
 from uuid import uuid4
 
 from sqlalchemy import (
+    BigInteger,
     Boolean,
     JSON,
     DateTime,
@@ -73,6 +74,121 @@ class UsageDaily(Base):
     day: Mapped[str] = mapped_column(String(10), nullable=False, index=True)  # YYYY-MM-DD UTC
     query_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
     upload_count: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+
+
+class ModelPriceVersion(Base):
+    """Effective-dated model price snapshot used for reproducible cost reports."""
+
+    __tablename__ = "model_price_versions"
+    __table_args__ = (
+        UniqueConstraint(
+            "provider",
+            "model",
+            "operation_kind",
+            "version",
+            name="uq_model_price_version",
+        ),
+        Index(
+            "ix_model_price_lookup",
+            "provider",
+            "model",
+            "operation_kind",
+            "effective_from",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(
+        String(36), primary_key=True, default=lambda: str(uuid4())
+    )
+    provider: Mapped[str] = mapped_column(String(64), nullable=False)
+    model: Mapped[str] = mapped_column(String(128), nullable=False)
+    operation_kind: Mapped[str] = mapped_column(
+        String(32), nullable=False, default="chat"
+    )
+    version: Mapped[str] = mapped_column(String(64), nullable=False)
+    currency: Mapped[str] = mapped_column(String(12), nullable=False, default="CNY")
+    # Prices are stored as micro-currency units per one million tokens. For
+    # example CNY 2.00 / 1M tokens is stored as 2_000_000.
+    input_price_microunits_per_million: Mapped[int] = mapped_column(
+        BigInteger, nullable=False, default=0
+    )
+    cached_input_price_microunits_per_million: Mapped[int] = mapped_column(
+        BigInteger, nullable=False, default=0
+    )
+    output_price_microunits_per_million: Mapped[int] = mapped_column(
+        BigInteger, nullable=False, default=0
+    )
+    per_request_microunits: Mapped[int] = mapped_column(
+        BigInteger, nullable=False, default=0
+    )
+    effective_from: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
+
+
+class AIUsageEvent(Base):
+    """Append-only provider usage ledger attributed to users and research skills."""
+
+    __tablename__ = "ai_usage_events"
+    __table_args__ = (
+        Index("ix_ai_usage_user_created", "user_id", "created_at"),
+        Index("ix_ai_usage_request", "request_id"),
+        Index("ix_ai_usage_operation", "operation", "created_at"),
+        Index("ix_ai_usage_skill", "skill_id", "created_at"),
+    )
+
+    id: Mapped[str] = mapped_column(
+        String(36), primary_key=True, default=lambda: str(uuid4())
+    )
+    request_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    user_id: Mapped[str | None] = mapped_column(
+        String(36),
+        ForeignKey("users.id", ondelete="CASCADE"),
+        nullable=True,
+    )
+    conversation_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    message_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    document_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    index_job_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    skill_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    skill_version: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    operation: Mapped[str] = mapped_column(String(64), nullable=False)
+    provider: Mapped[str] = mapped_column(String(64), nullable=False)
+    model: Mapped[str] = mapped_column(String(128), nullable=False)
+    input_tokens: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0)
+    cached_input_tokens: Mapped[int] = mapped_column(
+        BigInteger, nullable=False, default=0
+    )
+    output_tokens: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0)
+    reasoning_tokens: Mapped[int] = mapped_column(
+        BigInteger, nullable=False, default=0
+    )
+    total_tokens: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0)
+    item_count: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    usage_source: Mapped[str] = mapped_column(
+        String(16), nullable=False, default="provider"
+    )
+    price_version: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    currency: Mapped[str] = mapped_column(
+        String(12), nullable=False, default="UNPRICED"
+    )
+    cost_microunits: Mapped[int] = mapped_column(
+        BigInteger, nullable=False, default=0
+    )
+    latency_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    status: Mapped[str] = mapped_column(
+        String(24), nullable=False, default="success"
+    )
+    provider_request_id: Mapped[str | None] = mapped_column(
+        String(128), nullable=True
+    )
+    extra = mapped_column(JsonStorageType, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
 
 
 class AuthCode(Base):

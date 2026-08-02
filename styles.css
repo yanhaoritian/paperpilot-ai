@@ -717,6 +717,7 @@ textarea:focus-visible {
 .field input,
 .create-row input,
 .model-inline input,
+.model-inline select,
 .chat-stage__composer textarea {
   width: 100%;
   border: 1px solid var(--line-strong);
@@ -740,6 +741,7 @@ textarea:focus-visible {
 .field input:focus,
 .create-row input:focus,
 .model-inline input:focus,
+.model-inline select:focus,
 .chat-stage__composer textarea:focus {
   border-color: var(--forest-500);
   box-shadow: 0 0 0 3px rgba(61, 139, 116, 0.13);
@@ -1800,6 +1802,19 @@ button.citation-card:hover {
   font-size: 0.72rem;
 }
 
+.model-inline select {
+  width: 10.8rem;
+  min-height: 2.05rem;
+  border-radius: 9px;
+  padding: 0.38rem 1.7rem 0.38rem 0.55rem;
+  color: var(--text-soft);
+  font-size: 0.72rem;
+}
+
+.skill-inline select {
+  width: 9.8rem;
+}
+
 .composer-hint {
   color: #949e99;
   font-size: 0.65rem;
@@ -2245,6 +2260,10 @@ button.citation-card:hover {
   }
 
   .model-inline input {
+    width: 9.2rem;
+  }
+
+  .model-inline select {
     width: 9.2rem;
   }
 
@@ -3697,5 +3716,384 @@ button.citation-card:hover {
 
   .page-app .chat-stage__head {
     grid-template-columns: 1fr;
+  }
+}
+
+/* AI usage and cost ledger */
+
+.stat-pill--button {
+  appearance: none;
+  font: inherit;
+  cursor: pointer;
+}
+
+.page-app .stat-pill--button {
+  transition: color 160ms ease, background 160ms ease, box-shadow 160ms ease;
+}
+
+.page-app .stat-pill--button:hover,
+.page-app .stat-pill--button:focus-visible {
+  color: #4144b9;
+  background: #fff;
+  box-shadow: 0 2px 10px rgba(53, 55, 130, 0.09);
+  outline: none;
+}
+
+.page-app.is-usage-open {
+  overflow: hidden;
+}
+
+.usage-modal[hidden] {
+  display: none;
+}
+
+.usage-modal {
+  position: fixed;
+  z-index: 1200;
+  inset: 0;
+  display: grid;
+  padding: 1.2rem;
+  place-items: center;
+}
+
+.usage-modal__backdrop {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  border: 0;
+  background: rgba(24, 25, 39, 0.42);
+  backdrop-filter: blur(6px);
+  cursor: default;
+}
+
+.usage-dialog {
+  position: relative;
+  display: flex;
+  width: min(920px, calc(100vw - 2.4rem));
+  max-height: min(820px, calc(100vh - 2.4rem));
+  flex-direction: column;
+  overflow: hidden;
+  border: 1px solid rgba(226, 227, 236, 0.95);
+  border-radius: 24px;
+  background: #fbfbfd;
+  box-shadow: 0 28px 90px rgba(25, 27, 60, 0.25);
+}
+
+.usage-dialog__head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 1rem;
+  border-bottom: 1px solid #e7e8ee;
+  padding: 1.35rem 1.45rem 1.15rem;
+  background:
+    radial-gradient(circle at 12% -30%, rgba(96, 99, 217, 0.18), transparent 42%),
+    #fff;
+}
+
+.usage-dialog__head h2 {
+  margin: 0.24rem 0 0.16rem;
+  color: #242536;
+  font-family: var(--font-display);
+  font-size: clamp(1.45rem, 3vw, 2rem);
+  letter-spacing: -0.04em;
+}
+
+.usage-dialog__head p {
+  margin: 0;
+  color: #858795;
+  font-size: 0.78rem;
+}
+
+.usage-dialog__close {
+  display: grid;
+  width: 2.3rem;
+  height: 2.3rem;
+  flex: 0 0 auto;
+  place-items: center;
+  border: 1px solid #e2e3ea;
+  border-radius: 50%;
+  color: #616372;
+  background: rgba(255, 255, 255, 0.88);
+  font: 400 1.45rem/1 var(--font-body);
+  cursor: pointer;
+}
+
+.usage-dialog__close:hover,
+.usage-dialog__close:focus-visible {
+  color: #3f42b7;
+  border-color: #cfd1f1;
+  outline: none;
+}
+
+.usage-dialog__body {
+  display: grid;
+  gap: 1rem;
+  overflow-y: auto;
+  padding: 1.15rem 1.4rem 1.4rem;
+  scrollbar-color: #c9cad5 transparent;
+  scrollbar-width: thin;
+}
+
+.usage-summary-grid {
+  display: grid;
+  grid-template-columns: 1.25fr repeat(3, 1fr);
+  gap: 0.7rem;
+}
+
+.usage-summary-card {
+  display: grid;
+  min-height: 104px;
+  align-content: center;
+  gap: 0.28rem;
+  border: 1px solid #e4e5eb;
+  border-radius: 16px;
+  padding: 0.85rem 0.95rem;
+  background: #fff;
+}
+
+.usage-summary-card span,
+.usage-summary-card small {
+  color: #888a98;
+  font-size: 0.69rem;
+}
+
+.usage-summary-card strong {
+  overflow: hidden;
+  color: #292a3c;
+  font-size: clamp(1.25rem, 2.7vw, 1.72rem);
+  font-variant-numeric: tabular-nums;
+  letter-spacing: -0.045em;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.usage-summary-card--primary {
+  border-color: #d6d7f1;
+  color: #fff;
+  background: linear-gradient(145deg, #5559cf, #4447b8);
+  box-shadow: 0 10px 24px rgba(69, 72, 184, 0.16);
+}
+
+.usage-summary-card--primary span,
+.usage-summary-card--primary small {
+  color: rgba(255, 255, 255, 0.72);
+}
+
+.usage-summary-card--primary strong {
+  color: #fff;
+}
+
+.usage-cost-section,
+.usage-breakdown-card {
+  border: 1px solid #e4e5eb;
+  border-radius: 18px;
+  background: #fff;
+}
+
+.usage-cost-section {
+  padding: 1rem 1.05rem;
+}
+
+.usage-section-title,
+.usage-breakdown-card__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.9rem;
+}
+
+.usage-section-title > div {
+  display: grid;
+  gap: 0.12rem;
+}
+
+.usage-section-title span,
+.usage-breakdown-card__head h3 {
+  margin: 0;
+  color: #303144;
+  font-size: 0.82rem;
+  font-weight: 750;
+}
+
+.usage-section-title small,
+.usage-breakdown-card__head span {
+  color: #9a9ba7;
+  font-size: 0.64rem;
+}
+
+.usage-section-title > strong {
+  color: #4c4fc3;
+  font-size: 1.05rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.usage-cost-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  margin-top: 0.78rem;
+}
+
+.usage-cost-chip {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 0.35rem;
+  border-radius: 999px;
+  padding: 0.42rem 0.7rem;
+  color: #565866;
+  background: #f2f2f7;
+  font-size: 0.7rem;
+}
+
+.usage-cost-chip strong {
+  color: #292a3c;
+  font-size: 0.86rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.usage-accounting-note {
+  margin: 0.72rem 0 0;
+  color: #898b98;
+  font-size: 0.68rem;
+  line-height: 1.55;
+}
+
+.usage-breakdown-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.8rem;
+}
+
+.usage-breakdown-card {
+  min-width: 0;
+  padding: 0.95rem 1rem;
+}
+
+.usage-breakdown-card__head {
+  padding-bottom: 0.65rem;
+}
+
+.usage-breakdown-list {
+  display: grid;
+  gap: 0.15rem;
+}
+
+.usage-breakdown-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 0.75rem;
+  border-top: 1px solid #f0f0f4;
+  padding: 0.62rem 0;
+}
+
+.usage-breakdown-row__name {
+  overflow: hidden;
+  color: #4f5160;
+  font-size: 0.72rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.usage-breakdown-row__value {
+  display: grid;
+  justify-items: end;
+  gap: 0.1rem;
+  color: #2e3042;
+  font-size: 0.72rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.usage-breakdown-row__value small {
+  color: #9a9ba7;
+  font-size: 0.6rem;
+}
+
+.usage-empty {
+  border-top: 1px solid #f0f0f4;
+  padding: 0.8rem 0 0.25rem;
+  color: #a0a1ad;
+  font-size: 0.7rem;
+}
+
+@media (max-width: 720px) {
+  .usage-modal {
+    align-items: end;
+    padding: 0;
+  }
+
+  .usage-dialog {
+    width: 100%;
+    max-height: 92vh;
+    border-width: 1px 0 0;
+    border-radius: 22px 22px 0 0;
+  }
+
+  .usage-dialog__head {
+    padding: 1.1rem 1rem 0.95rem;
+  }
+
+  .usage-dialog__body {
+    padding: 0.9rem 0.85rem 1.1rem;
+  }
+
+  .usage-summary-grid,
+  .usage-breakdown-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .usage-breakdown-card {
+    grid-column: 1 / -1;
+  }
+}
+
+@media (max-width: 420px) {
+  .usage-summary-grid {
+    gap: 0.5rem;
+  }
+
+  .usage-summary-card {
+    min-height: 92px;
+    padding: 0.72rem;
+  }
+
+  .usage-section-title {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+}
+
+/* Keep the usage ledger reachable on phones while collapsing secondary stats. */
+@media (max-width: 820px) {
+  .page-app .app-topbar {
+    grid-template-columns: minmax(0, 1fr) auto auto;
+  }
+
+  .page-app .topbar-stats {
+    display: flex;
+    width: auto;
+    padding: 0;
+    border: 0;
+    background: transparent;
+  }
+
+  .page-app .topbar-stats .stat-pill {
+    display: none;
+  }
+
+  .page-app .topbar-stats #usageCostPill {
+    display: inline-flex;
+    padding: 0.38rem 0.52rem;
+    border: 1px solid #e1e2e9;
+    border-radius: 10px;
+    background: #f6f6f9;
+  }
+}
+
+@media (max-width: 420px) {
+  .page-app .topbar-stats #usageCostPill i {
+    display: none;
   }
 }

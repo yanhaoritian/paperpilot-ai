@@ -15,6 +15,7 @@ from app.db import SessionLocal
 from app.models import Conversation, ConversationMemory, Message
 from app.services.openai_client import chat_json, embed_texts
 from app.services.prompt_budget import budget_history, clip_text
+from app.services.usage_tracking import usage_scope
 from app.services.retrieve import _cosine
 
 logger = logging.getLogger(__name__)
@@ -184,6 +185,7 @@ def rewrite_retrieval_query(
             messages,
             model=(settings.memory_model or model or None),
             temperature=0.0,
+            operation="query_rewrite",
         )
         subject = clip_text(
             str(raw.get("resolved_subject") or "").strip(),
@@ -353,7 +355,7 @@ def recall_conversation_memories(
 
     query_vector: list[float] | None = None
     try:
-        query_vector = embed_texts([query])[0]
+        query_vector = embed_texts([query], operation="memory_query_embedding")[0]
     except Exception as exc:  # noqa: BLE001
         logger.warning(
             "conversation-memory query embedding failed; using lexical recall: %s",
@@ -590,6 +592,7 @@ def _summarize_episode(
             messages,
             model=(settings.memory_model or model or None),
             temperature=0.0,
+            operation="memory_summary",
         )
         summary = clip_text(
             str(raw.get("summary") or "").strip(),
@@ -621,6 +624,10 @@ def refresh_conversation_memory(
     owner_id: str,
     *,
     model: str | None = None,
+    request_id: str | None = None,
+    message_id: str | None = None,
+    skill_id: str | None = None,
+    skill_version: str | None = None,
 ) -> dict[str, Any]:
     """Compact one stable batch without holding a DB lock during model calls."""
     settings = get_settings()
@@ -693,24 +700,32 @@ def refresh_conversation_memory(
     finally:
         snapshot.close()
 
-    summary, episode, importance = _summarize_episode(
-        existing_summary=existing_summary,
-        transcript=transcript,
-        model=model,
-    )
-    embedding: list[float] | None = None
-    embedding_model: str | None = None
-    embedding_version: str | None = None
-    if settings.memory_semantic_recall_enabled and episode:
-        try:
-            embedding = embed_texts([episode])[0]
-            embedding_model = settings.embedding_model
-            embedding_version = settings.embedding_version
-        except Exception as exc:  # noqa: BLE001
-            logger.warning(
-                "conversation-memory episode embedding failed; storing text only: %s",
-                exc,
-            )
+    with usage_scope(
+        request_id=request_id,
+        user_id=owner_id,
+        conversation_id=conversation_id,
+        message_id=message_id,
+        skill_id=skill_id,
+        skill_version=skill_version,
+    ):
+        summary, episode, importance = _summarize_episode(
+            existing_summary=existing_summary,
+            transcript=transcript,
+            model=model,
+        )
+        embedding: list[float] | None = None
+        embedding_model: str | None = None
+        embedding_version: str | None = None
+        if settings.memory_semantic_recall_enabled and episode:
+            try:
+                embedding = embed_texts([episode], operation="memory_embedding")[0]
+                embedding_model = settings.embedding_model
+                embedding_version = settings.embedding_version
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(
+                    "conversation-memory episode embedding failed; storing text only: %s",
+                    exc,
+                )
 
     commit_db = SessionLocal()
     try:

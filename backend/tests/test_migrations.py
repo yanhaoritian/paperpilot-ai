@@ -44,7 +44,7 @@ def test_alembic_creates_current_schema_on_empty_db(tmp_path):
                 "SELECT name FROM sqlite_master WHERE type='table'"
             )
         }
-    assert version == "0008_conversation_memory"
+    assert version == "0009_research_skills_usage"
     assert {
         "users",
         "libraries",
@@ -58,6 +58,8 @@ def test_alembic_creates_current_schema_on_empty_db(tmp_path):
         "auth_codes",
         "worker_heartbeats",
         "conversation_memories",
+        "ai_usage_events",
+        "model_price_versions",
     }.issubset(tables)
 
 
@@ -189,5 +191,7 @@ def test_alembic_adopts_legacy_schema(tmp_path):
         "auth_codes",
         "worker_heartbeats",
         "conversation_memories",
+        "ai_usage_events",
+        "model_price_versions",
     } <= tables
     assert ordered_messages == [("user", 1), ("assistant", 2)]

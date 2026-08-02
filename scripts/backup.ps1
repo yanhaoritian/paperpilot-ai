@@ -91,8 +91,8 @@ if ($Docker) {
         $Counts = @("table,count")
         foreach ($Table in @(
             "auth_codes", "blocks", "chunks", "conversations", "documents",
-            "conversation_memories", "index_jobs", "libraries", "messages",
-            "usage_daily", "users", "worker_heartbeats"
+            "ai_usage_events", "conversation_memories", "index_jobs", "libraries", "messages",
+            "model_price_versions", "usage_daily", "users", "worker_heartbeats"
         )) {
             $Exists = docker exec $ContainerId psql -U paperpilot -d paperpilot -At `
                 -c "SELECT to_regclass('public.$Table') IS NOT NULL;"

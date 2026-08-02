@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <meta name="theme-color" content="#f4f5f9">
   <title>工作台 · PaperPilot</title>
-  <link rel="stylesheet" href="styles.css?v=20260731ui3">
+  <link rel="stylesheet" href="styles.css?v=20260802skills3">
 </head>
 <body class="page-app">
   <div class="app-layout">
@@ -33,6 +33,9 @@
         <span class="stat-pill"><i>模型</i><strong id="healthModelName">—</strong></span>
         <span class="stat-pill"><i>引用命中</i><strong id="healthRetrievalHit">0</strong></span>
         <span class="stat-pill"><i>路径</i><strong id="healthResponsePath">—</strong></span>
+        <button type="button" class="stat-pill stat-pill--button" id="usageCostPill" title="查看近 30 天 AI 用量与成本" aria-haspopup="dialog" aria-expanded="false">
+          <i>AI 消耗</i><strong id="usageCostSummary">—</strong>
+        </button>
       </div>
 
       <div class="topbar-user">
@@ -174,6 +177,12 @@
                   <option value="deepseek-v4-pro"></option>
                 </datalist>
               </label>
+              <label class="model-inline skill-inline">
+                <span>科研模式</span>
+                <select id="skillSelect" aria-label="科研模式">
+                  <option value="auto">自动选择</option>
+                </select>
+              </label>
               <span class="composer-hint">Enter 发送 · Shift + Enter 换行</span>
             </div>
             <button type="button" class="btn btn-primary composer-submit" id="ragQueryBtn" disabled>
@@ -186,6 +195,74 @@
     </div>
   </div>
 
-  <script src="app.js?v=20260731ui3"></script>
+  <div class="usage-modal" id="usageModal" hidden>
+    <button type="button" class="usage-modal__backdrop" id="usageModalBackdrop" aria-label="关闭 AI 用量面板"></button>
+    <section class="usage-dialog" role="dialog" aria-modal="true" aria-labelledby="usageDialogTitle">
+      <header class="usage-dialog__head">
+        <div>
+          <span class="section-kicker">AI COST LEDGER</span>
+          <h2 id="usageDialogTitle">AI 用量与成本</h2>
+          <p id="usageRangeLabel">最近 30 天 · 按当前账号归集</p>
+        </div>
+        <button type="button" class="usage-dialog__close" id="usageCloseBtn" aria-label="关闭">×</button>
+      </header>
+
+      <div class="usage-dialog__body">
+        <div class="usage-summary-grid" aria-label="Token 用量摘要">
+          <article class="usage-summary-card usage-summary-card--primary">
+            <span>总 Token</span>
+            <strong id="usageTotalTokens">0</strong>
+            <small id="usageEventSummary">尚无调用记录</small>
+          </article>
+          <article class="usage-summary-card">
+            <span>输入</span>
+            <strong id="usageInputTokens">0</strong>
+            <small>含缓存输入</small>
+          </article>
+          <article class="usage-summary-card">
+            <span>缓存输入</span>
+            <strong id="usageCachedTokens">0</strong>
+            <small>按供应商 usage 归一</small>
+          </article>
+          <article class="usage-summary-card">
+            <span>输出</span>
+            <strong id="usageOutputTokens">0</strong>
+            <small id="usageReasoningTokens">推理 0</small>
+          </article>
+        </div>
+
+        <section class="usage-cost-section">
+          <div class="usage-section-title">
+            <div>
+              <span>核算金额</span>
+              <small>价格按调用发生时的版本锁定</small>
+            </div>
+            <strong id="usageCostHeadline">尚未配置单价</strong>
+          </div>
+          <div class="usage-cost-list" id="usageCostList"></div>
+          <p class="usage-accounting-note" id="usageAccountingNote"></p>
+        </section>
+
+        <div class="usage-breakdown-grid">
+          <section class="usage-breakdown-card">
+            <div class="usage-breakdown-card__head">
+              <h3>按调用环节</h3>
+              <span>Tokens / 成本</span>
+            </div>
+            <div class="usage-breakdown-list" id="usageOperationList"></div>
+          </section>
+          <section class="usage-breakdown-card">
+            <div class="usage-breakdown-card__head">
+              <h3>按科研模式</h3>
+              <span>Tokens / 成本</span>
+            </div>
+            <div class="usage-breakdown-list" id="usageSkillList"></div>
+          </section>
+        </div>
+      </div>
+    </section>
+  </div>
+
+  <script src="app.js?v=20260802skills3"></script>
 </body>
 </html>

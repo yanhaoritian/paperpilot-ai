@@ -27,6 +27,7 @@ from app.models import (
 )
 from app.services.index_recovery import reclaim_and_retry_indexing
 from app.services.indexing import index_document_with_retries
+from app.services.usage_tracking import sync_configured_model_prices
 
 logger = logging.getLogger("paperpilot.worker")
 _stop = threading.Event()
@@ -220,6 +221,7 @@ def _remove_heartbeat() -> None:
 def run_worker(*, once: bool = False) -> None:
     settings = get_settings()
     init_db()
+    sync_configured_model_prices()
     reclaim_and_retry_indexing(execute=False)
     poll_seconds = max(0.2, float(settings.index_worker_poll_seconds))
     recovery_seconds = max(10, int(settings.index_worker_recovery_seconds))

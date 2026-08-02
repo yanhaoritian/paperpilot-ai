@@ -15,7 +15,7 @@ from fastapi import FastAPI, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 
-from app.api import auth, conversations, documents, health, libraries, query
+from app.api import auth, conversations, documents, health, libraries, query, research
 from app.config import get_settings
 from app.db import init_db
 from app.services.client_ip import client_ip
@@ -67,12 +67,17 @@ async def lifespan(_app: FastAPI):
     _assert_startup_security(cfg)
     Path(cfg.pdf_storage_dir).mkdir(parents=True, exist_ok=True)
     init_db()
+    from app.services.usage_tracking import sync_configured_model_prices
+
+    price_rows = sync_configured_model_prices()
     logger.info(
         "startup complete provider=%s db=%s expose_code=%s",
         cfg.embedding_provider,
         "sqlite" if cfg.is_sqlite else "postgres",
         cfg.auth_expose_code,
     )
+    if price_rows:
+        logger.info("loaded %s configured model price versions", price_rows)
     if cfg.index_recover_on_startup and not cfg.index_external_worker:
         from app.services.index_recovery import reclaim_and_retry_indexing
 
@@ -115,6 +120,7 @@ def create_app() -> FastAPI:
     @app.middleware("http")
     async def request_middleware(request: Request, call_next: Callable) -> Response:
         request_id = request.headers.get("x-request-id") or str(uuid.uuid4())
+        request.state.request_id = request_id
         start = time.perf_counter()
         path = request.url.path
         client = client_ip(request, settings.trusted_proxy_cidrs)
@@ -179,6 +185,7 @@ def create_app() -> FastAPI:
     app.include_router(query.router)
     app.include_router(conversations.router)
     app.include_router(health.router)
+    app.include_router(research.router)
 
     # Serve frontend assets only (do not expose .env / backend source)
     @app.get("/")

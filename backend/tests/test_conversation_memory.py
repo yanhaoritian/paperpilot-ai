@@ -154,7 +154,7 @@ def test_compaction_creates_versioned_episode_without_losing_recent_turns(
     monkeypatch.setattr(
         conversation_memory,
         "embed_texts",
-        lambda _texts: [[1.0, 0.0]],
+        lambda _texts, **_kwargs: [[1.0, 0.0]],
     )
 
     result = conversation_memory.refresh_conversation_memory(
@@ -208,7 +208,7 @@ def test_memory_recall_is_owner_and_conversation_scoped(
     monkeypatch.setattr(
         conversation_memory,
         "embed_texts",
-        lambda _texts: [[1.0, 0.0]],
+        lambda _texts, **_kwargs: [[1.0, 0.0]],
     )
     db = local_session()
     db.add_all(
@@ -331,7 +331,7 @@ def test_sixty_message_thread_compacts_to_summary_plus_recent_window(
     monkeypatch.setattr(
         conversation_memory,
         "embed_texts",
-        lambda _texts: [[1.0, 0.0]],
+        lambda _texts, **_kwargs: [[1.0, 0.0]],
     )
 
     updates = 0

@@ -76,6 +76,9 @@ def test_response_cache_key_tracks_corpus_prompt_and_resolved_model():
     assert original != make_query_cache_key(
         **{**base, "model": "new-default-model"}
     )
+    assert original != make_query_cache_key(
+        **{**base, "skill_id": "paper_deep_read", "skill_version": "v1"}
+    )
 
 
 class _Rows:

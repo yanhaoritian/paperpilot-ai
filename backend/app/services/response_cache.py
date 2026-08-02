@@ -131,6 +131,8 @@ def make_query_cache_key(
     history_fingerprint: str = "",
     corpus_revision: str = "",
     prompt_version: str = "",
+    skill_id: str = "",
+    skill_version: str = "",
 ) -> str:
     payload = {
         "owner_id": owner_id,
@@ -142,6 +144,8 @@ def make_query_cache_key(
         "history": history_fingerprint or "",
         "corpus_revision": corpus_revision or "",
         "prompt_version": prompt_version or "",
+        "skill_id": skill_id or "",
+        "skill_version": skill_version or "",
     }
     raw = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     digest = hashlib.sha256(raw.encode("utf-8")).hexdigest()

@@ -168,6 +168,7 @@ def build_rag_messages(
     inventory_text: str | None = None,
     intent_hint: str | None = None,
     document_cards_text: str | None = None,
+    skill_prompt: str | None = None,
 ) -> list[dict[str, str]]:
     user = _build_user_payload(
         question,
@@ -177,7 +178,10 @@ def build_rag_messages(
         intent_hint=intent_hint,
         document_cards_text=document_cards_text,
     )
-    return [{"role": "system", "content": RAG_JSON_SYSTEM}, {"role": "user", "content": user}]
+    system = RAG_JSON_SYSTEM
+    if skill_prompt:
+        system = f"{system}\n\n{skill_prompt.strip()}"
+    return [{"role": "system", "content": system}, {"role": "user", "content": user}]
 
 
 def build_rag_stream_messages(
@@ -189,9 +193,13 @@ def build_rag_stream_messages(
     inventory_text: str | None = None,
     intent_hint: str | None = None,
     document_cards_text: str | None = None,
+    skill_prompt: str | None = None,
 ) -> list[dict[str, str]]:
     """Messages for plain-text streaming answers (citations attached separately)."""
-    messages: list[dict[str, str]] = [{"role": "system", "content": RAG_STREAM_SYSTEM}]
+    system = RAG_STREAM_SYSTEM
+    if skill_prompt:
+        system = f"{system}\n\n{skill_prompt.strip()}"
+    messages: list[dict[str, str]] = [{"role": "system", "content": system}]
     settings = get_settings()
     memory_text = format_conversation_context(
         conversation_context,
@@ -258,6 +266,7 @@ def generate_answer(
     inventory_text: str | None = None,
     intent_hint: str | None = None,
     document_cards_text: str | None = None,
+    skill_prompt: str | None = None,
 ) -> dict[str, Any]:
     if not retrieved:
         return empty_answer()
@@ -270,9 +279,11 @@ def generate_answer(
             inventory_text=inventory_text,
             intent_hint=intent_hint,
             document_cards_text=document_cards_text,
+            skill_prompt=skill_prompt,
         ),
         model=model,
         temperature=temperature,
+        operation="answer_generate",
     )
 
     citations_in = raw.get("citations") if isinstance(raw.get("citations"), list) else []

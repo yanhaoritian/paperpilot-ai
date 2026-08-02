@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import logging
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from dataclasses import asdict
 
 from app.config import get_settings
 from app.services.chunking import clamp
 from app.services.structure import StructuredBlock
+from app.services.usage_tracking import current_usage_attribution, usage_scope
 
 logger = logging.getLogger(__name__)
 
@@ -124,7 +126,7 @@ def _llm_prefix_for_chunk(file_name: str, chunk: dict) -> str | None:
             ),
         },
     ]
-    raw = chat_json(prompt, temperature=0.1)
+    raw = chat_json(prompt, temperature=0.1, operation="contextual_prefix")
     pref = str(raw.get("prefix") or "").strip()
     if not pref:
         return None
@@ -157,10 +159,12 @@ def build_contextual_prefixes(
     if n <= 0:
         return prefixes
     workers = max(1, min(n, int(settings.contextual_prefix_concurrency or 8)))
+    attribution = current_usage_attribution()
 
     def _job(i: int) -> tuple[int, str | None]:
         try:
-            return i, _llm_prefix_for_chunk(file_name, chunks[i])
+            with usage_scope(**asdict(attribution)):
+                return i, _llm_prefix_for_chunk(file_name, chunks[i])
         except Exception:  # noqa: BLE001
             logger.exception("contextual prefix failed for chunk %s", i)
             return i, None

@@ -58,7 +58,8 @@
 1. 已从当前 SQLAlchemy metadata 建立 `0002_current_schema` 幂等 baseline；
 2. 已增加 `0003_worker_heartbeat`、`0004_index_job_leases`、
    `0005_schema_convergence`、`0006_portable_document_paths` 和
-   `0007_postgres_trigram_search`、`0008_conversation_memory` 增量迁移；
+   `0007_postgres_trigram_search`、`0008_conversation_memory`、
+   `0009_research_skills_usage` 增量迁移；
 3. 已验证空 SQLite、旧版 SQLite、空 PostgreSQL、合成旧版 PostgreSQL，以及真实项目
    数据库克隆升级；
 4. 迁移后的 PostgreSQL 运行 `alembic check` 无 schema 漂移，JSONB、索引、非空约束
@@ -168,7 +169,7 @@ Prometheus/OpenTelemetry，形成趋势、告警和分位延迟指标。
 
 1. 运行单元测试、检索回归、JavaScript 语法检查和 Compose 配置检查；
 2. 使用备份脚本同时备份生产 PostgreSQL 与 PDF，并验证 dump 和 SHA-256 清单；
-3. 在生产数据副本升级到 `0008`，验证 schema、消息序号、文献/记忆向量维度、稀疏索引和引用打开；
+3. 在生产数据副本升级到 `0009`，验证 schema、用量账本、消息序号、文献/记忆向量维度、稀疏索引和引用打开；
 4. 在生产机执行迁移并重建 `api + worker`，先通过 `/api/health` 和存储全量审计；
 5. 灰度开放前端，执行注册、登录、上传、索引、问答、引用打开和删除的冒烟测试；
 6. 观察 24 小时错误率、Worker 心跳、队列积压、索引失败、缓存命中和模型成本；

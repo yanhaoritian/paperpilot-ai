@@ -126,6 +126,7 @@ class QueryRequest(BaseModel):
     library_ids: list[str] = Field(min_length=1)
     model: str | None = None
     temperature: float = Field(default=0.2, ge=0, le=1)
+    skill_id: str | None = Field(default="auto", max_length=64)
 
 
 class QueryResponse(BaseModel):
@@ -135,6 +136,9 @@ class QueryResponse(BaseModel):
     retrieval_hit: int = 0
     degraded: bool = False
     out_of_scope: bool = False
+    skill_id: str | None = None
+    skill_version: str | None = None
+    skill_validation: dict | None = None
 
 
 class ConversationCreate(BaseModel):
@@ -200,6 +204,7 @@ class ConversationMessageRequest(BaseModel):
     library_ids: list[str] | None = None
     model: str | None = None
     temperature: float = Field(default=0.2, ge=0, le=1)
+    skill_id: str | None = Field(default="auto", max_length=64)
 
 
 class HealthResponse(BaseModel):
@@ -223,3 +228,50 @@ class HealthResponse(BaseModel):
     memory_compaction_pending: int = 0
     memory_last_updated_at: datetime | None = None
     detail: dict | None = None
+
+
+class ResearchSkillOut(BaseModel):
+    id: str
+    version: str
+    title: str
+    description: str
+    requires_evidence: bool
+    cover_all_documents: bool
+    example_prompts: list[str] = Field(default_factory=list)
+
+
+class UsageCostBucket(BaseModel):
+    currency: str
+    cost_microunits: int
+    cost: float
+
+
+class UsageBreakdownOut(BaseModel):
+    key: str
+    events: int
+    total_tokens: int
+    unpriced_events: int
+    local_events: int
+    cache_hits: int
+    currencies: list[UsageCostBucket] = Field(default_factory=list)
+
+
+class UsageSummaryOut(BaseModel):
+    days: int
+    from_time: datetime
+    to_time: datetime
+    events: int
+    provider_reported_events: int
+    estimated_events: int
+    local_events: int
+    cache_hits: int
+    failed_events: int
+    input_tokens: int
+    cached_input_tokens: int
+    output_tokens: int
+    reasoning_tokens: int
+    total_tokens: int
+    costs: list[UsageCostBucket] = Field(default_factory=list)
+    unpriced_events: int
+    by_operation: list[UsageBreakdownOut] = Field(default_factory=list)
+    by_skill: list[UsageBreakdownOut] = Field(default_factory=list)

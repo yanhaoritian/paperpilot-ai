@@ -22,6 +22,7 @@ const fileSelected = document.getElementById("fileSelected");
 const uploadBtn = document.getElementById("uploadBtn");
 const docStatusLine = document.getElementById("docStatusLine");
 const modelSelect = document.getElementById("modelSelect");
+const skillSelect = document.getElementById("skillSelect");
 const ragQuestion = document.getElementById("ragQuestion");
 const ragQueryBtn = document.getElementById("ragQueryBtn");
 const ragClearChatBtn = document.getElementById("ragClearChatBtn");
@@ -36,6 +37,23 @@ const healthModelName = document.getElementById("healthModelName");
 const healthRetrievalHit = document.getElementById("healthRetrievalHit");
 const healthResponsePath = document.getElementById("healthResponsePath");
 const serviceStatusPill = document.getElementById("serviceStatusPill");
+const usageCostPill = document.getElementById("usageCostPill");
+const usageCostSummary = document.getElementById("usageCostSummary");
+const usageModal = document.getElementById("usageModal");
+const usageModalBackdrop = document.getElementById("usageModalBackdrop");
+const usageCloseBtn = document.getElementById("usageCloseBtn");
+const usageRangeLabel = document.getElementById("usageRangeLabel");
+const usageTotalTokens = document.getElementById("usageTotalTokens");
+const usageInputTokens = document.getElementById("usageInputTokens");
+const usageCachedTokens = document.getElementById("usageCachedTokens");
+const usageOutputTokens = document.getElementById("usageOutputTokens");
+const usageReasoningTokens = document.getElementById("usageReasoningTokens");
+const usageEventSummary = document.getElementById("usageEventSummary");
+const usageCostHeadline = document.getElementById("usageCostHeadline");
+const usageCostList = document.getElementById("usageCostList");
+const usageAccountingNote = document.getElementById("usageAccountingNote");
+const usageOperationList = document.getElementById("usageOperationList");
+const usageSkillList = document.getElementById("usageSkillList");
 
 let token = localStorage.getItem(TOKEN_KEY) || "";
 /** @type {Array<any>} */
@@ -49,9 +67,198 @@ let conversations = [];
 let activeConversationId = "";
 let activeConversationMemoryEnabled = true;
 let streaming = false;
+/** @type {Array<any>} */
+let researchSkills = [];
+let latestUsageSummary = null;
 
 function apiUrl(path) {
   return path.startsWith("/") ? path : `/${path}`;
+}
+
+function compactNumber(value) {
+  const n = Number(value || 0);
+  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(n >= 10_000_000 ? 0 : 1)}M`;
+  if (n >= 1_000) return `${(n / 1_000).toFixed(n >= 100_000 ? 0 : 1)}K`;
+  return String(n);
+}
+
+const USAGE_OPERATION_LABELS = {
+  answer_generate: "模型回答",
+  query_rewrite: "问题改写",
+  query_embedding: "查询向量化",
+  document_embedding: "文档向量化",
+  memory_query_embedding: "记忆检索向量化",
+  memory_embedding: "长期记忆向量化",
+  memory_summary: "长期记忆摘要",
+  rerank: "语义精排",
+  agent_plan: "Agent 规划",
+  contextual_prefix: "上下文前缀",
+  vision_page: "PDF 视觉解析",
+  response_cache_hit: "回答缓存命中",
+  unattributed: "未归属"
+};
+
+function fullNumber(value) {
+  return new Intl.NumberFormat("zh-CN").format(Number(value || 0));
+}
+
+function costText(currencies, digits = 6) {
+  const rows = Array.isArray(currencies) ? currencies : [];
+  if (!rows.length) return "未定价";
+  return rows
+    .map((row) => `${row.currency} ${Number(row.cost || 0).toFixed(digits)}`)
+    .join(" · ");
+}
+
+function breakdownAccountingText(row) {
+  const parts = [];
+  if (Array.isArray(row.currencies) && row.currencies.length) {
+    parts.push(costText(row.currencies));
+  }
+  if (row.unpriced_events) parts.push(`${fullNumber(row.unpriced_events)} 次待定价`);
+  if (row.local_events) parts.push(`${fullNumber(row.local_events)} 次本地`);
+  if (row.cache_hits) parts.push(`${fullNumber(row.cache_hits)} 次缓存`);
+  return parts.length ? parts.join(" · ") : "无计费金额";
+}
+
+function renderUsageBreakdown(container, rows, labelForKey) {
+  if (!container) return;
+  const values = Array.isArray(rows) ? rows.slice(0, 10) : [];
+  if (!values.length) {
+    container.innerHTML = '<p class="usage-empty">尚无可展示的调用记录。</p>';
+    return;
+  }
+  container.innerHTML = values.map((row) => {
+    const label = labelForKey(row.key);
+    return `
+      <div class="usage-breakdown-row">
+        <span class="usage-breakdown-row__name" title="${escapeHtml(label)}">${escapeHtml(label)}</span>
+        <span class="usage-breakdown-row__value">
+          <strong>${escapeHtml(compactNumber(row.total_tokens))} tokens</strong>
+          <small>${escapeHtml(breakdownAccountingText(row))} · ${fullNumber(row.events)} 次事件</small>
+        </span>
+      </div>`;
+  }).join("");
+}
+
+function renderUsagePanel(usage) {
+  if (!usage) return;
+  const costs = Array.isArray(usage.costs) ? usage.costs : [];
+  if (usageRangeLabel) usageRangeLabel.textContent = `最近 ${usage.days || 30} 天 · 按当前账号归集`;
+  if (usageTotalTokens) usageTotalTokens.textContent = fullNumber(usage.total_tokens);
+  if (usageInputTokens) usageInputTokens.textContent = fullNumber(usage.input_tokens);
+  if (usageCachedTokens) usageCachedTokens.textContent = fullNumber(usage.cached_input_tokens);
+  if (usageOutputTokens) usageOutputTokens.textContent = fullNumber(usage.output_tokens);
+  if (usageReasoningTokens) usageReasoningTokens.textContent = `推理 ${fullNumber(usage.reasoning_tokens)}`;
+  if (usageEventSummary) {
+    usageEventSummary.textContent = `${fullNumber(usage.events)} 次事件 · 精确 ${fullNumber(usage.provider_reported_events)} · 估算 ${fullNumber(usage.estimated_events)}`;
+  }
+
+  if (usageCostHeadline) {
+    if (costs.length === 1) usageCostHeadline.textContent = costText(costs, 6);
+    else if (costs.length > 1) usageCostHeadline.textContent = `${costs.length} 个币种分别核算`;
+    else if (usage.unpriced_events) usageCostHeadline.textContent = "有用量待配置单价";
+    else usageCostHeadline.textContent = usage.events ? "暂无计费金额" : "尚无调用记录";
+  }
+  if (usageCostList) {
+    usageCostList.innerHTML = costs.length
+      ? costs.map((row) => `
+          <span class="usage-cost-chip">
+            ${escapeHtml(row.currency)}
+            <strong>${Number(row.cost || 0).toFixed(6)}</strong>
+          </span>`).join("")
+      : '<span class="usage-cost-chip">Token 已记录，金额待价格配置</span>';
+  }
+
+  if (usageAccountingNote) {
+    const notes = [];
+    if (usage.unpriced_events) notes.push(`${fullNumber(usage.unpriced_events)} 次可计费调用尚未配置匹配单价`);
+    if (usage.estimated_events) notes.push(`${fullNumber(usage.estimated_events)} 次调用使用 Token 估算值`);
+    if (usage.local_events) notes.push(`${fullNumber(usage.local_events)} 次本地向量计算不产生供应商费用`);
+    if (usage.cache_hits) notes.push(`${fullNumber(usage.cache_hits)} 次回答命中缓存`);
+    if (usage.failed_events) notes.push(`${fullNumber(usage.failed_events)} 次失败调用不计入金额`);
+    usageAccountingNote.textContent = notes.length
+      ? `${notes.join("；")}。`
+      : "精确 Token 来自供应商 usage；历史金额按调用发生时的价格版本保留。";
+  }
+
+  renderUsageBreakdown(
+    usageOperationList,
+    usage.by_operation,
+    (key) => USAGE_OPERATION_LABELS[key] || key
+  );
+  renderUsageBreakdown(
+    usageSkillList,
+    usage.by_skill,
+    (key) => researchSkills.find((skill) => skill.id === key)?.title || (key === "unattributed" ? "系统后台任务" : key)
+  );
+}
+
+async function openUsagePanel() {
+  if (!usageModal) return;
+  usageModal.hidden = false;
+  document.body.classList.add("is-usage-open");
+  usageCostPill?.setAttribute("aria-expanded", "true");
+  usageCloseBtn?.focus();
+  if (latestUsageSummary) renderUsagePanel(latestUsageSummary);
+  await refreshUsageSummary();
+}
+
+function closeUsagePanel() {
+  if (!usageModal || usageModal.hidden) return;
+  usageModal.hidden = true;
+  document.body.classList.remove("is-usage-open");
+  usageCostPill?.setAttribute("aria-expanded", "false");
+  usageCostPill?.focus();
+}
+
+async function refreshResearchSkills() {
+  if (!skillSelect) return;
+  researchSkills = await api("/api/research/skills");
+  const previous = skillSelect.value || "auto";
+  skillSelect.innerHTML = '<option value="auto">自动选择</option>';
+  for (const skill of researchSkills) {
+    const option = document.createElement("option");
+    option.value = skill.id;
+    option.textContent = skill.title;
+    option.title = skill.description || "";
+    skillSelect.appendChild(option);
+  }
+  skillSelect.value = researchSkills.some((skill) => skill.id === previous) ? previous : "auto";
+  if (latestUsageSummary) renderUsagePanel(latestUsageSummary);
+}
+
+async function refreshUsageSummary() {
+  if (!usageCostSummary) return;
+  try {
+    const usage = await api("/api/research/usage?days=30");
+    latestUsageSummary = usage;
+    const costs = Array.isArray(usage.costs) ? usage.costs : [];
+    if (costs.length === 1) {
+      const row = costs[0];
+      usageCostSummary.textContent = `${row.currency} ${Number(row.cost || 0).toFixed(3)}`;
+    } else if (costs.length > 1) {
+      usageCostSummary.textContent = `${costs.length} 币种`;
+    } else {
+      usageCostSummary.textContent = usage.total_tokens ? `${compactNumber(usage.total_tokens)} tokens` : "暂无";
+    }
+    if (usageCostPill) {
+      const priced = costs.map((row) => `${row.currency} ${Number(row.cost || 0).toFixed(6)}`).join("；");
+      usageCostPill.title = [
+        `近 30 天 ${compactNumber(usage.total_tokens)} tokens`,
+        priced || "尚未配置模型单价",
+        `供应商精确 ${usage.provider_reported_events || 0} 次；估算 ${usage.estimated_events || 0} 次`,
+        `本地计算 ${usage.local_events || 0} 次；缓存命中 ${usage.cache_hits || 0} 次`,
+        `待定价 ${usage.unpriced_events || 0} 次；失败 ${usage.failed_events || 0} 次`
+      ].join("；");
+    }
+    renderUsagePanel(usage);
+  } catch {
+    usageCostSummary.textContent = "—";
+    if (usageAccountingNote && usageModal && !usageModal.hidden) {
+      usageAccountingNote.textContent = "用量明细加载失败，请稍后重试。";
+    }
+  }
 }
 
 function setStatus(text, isError = false) {
@@ -335,11 +542,12 @@ function renderStoredMessages(messages, truncated = false) {
       appendChat("user", `<p>${escapeHtml(m.content || "")}</p>`);
     } else {
       const meta = m.meta || {};
+      const skillLabel = meta.skill_title || meta.skill_id || "科研问答";
       const bubble = appendChat(
         "assistant",
         `${formatAnswerHtml(m.content || "")}
          ${citationsHtml(m.citations)}
-         <p class="bubble-meta">置信度 ${escapeHtml(meta.confidence || "N/A")} · 命中 ${meta.retrieval_hit ?? 0}</p>`
+         <p class="bubble-meta">${escapeHtml(skillLabel)} · 置信度 ${escapeHtml(meta.confidence || "N/A")} · 命中 ${meta.retrieval_hit ?? 0}</p>`
       );
       bindCitationActions(bubble);
     }
@@ -599,6 +807,7 @@ async function refreshDocuments() {
   if (!pending && pollTimer) {
     clearInterval(pollTimer);
     pollTimer = null;
+    refreshUsageSummary().catch(() => {});
   }
 }
 
@@ -810,6 +1019,7 @@ ragQueryBtn?.addEventListener("click", async () => {
   const textEl = bubble.querySelector(".stream-text");
   const citationsEl = bubble.querySelector(".stream-citations");
   const metaEl = bubble.querySelector(".bubble-meta");
+  let resolvedSkillTitle = "";
 
   const setBubbleStatus = (text, active = true) => {
     if (!statusEl) return;
@@ -831,7 +1041,8 @@ ragQueryBtn?.addEventListener("click", async () => {
         question,
         library_ids,
         model: (modelSelect?.value || "").trim() || null,
-        temperature: 0.2
+        temperature: 0.2,
+        skill_id: skillSelect?.value || "auto"
       })
     });
     if (!resp.ok) {
@@ -870,6 +1081,10 @@ ragQueryBtn?.addEventListener("click", async () => {
           if (memory.recalled_count) details.push(`召回 ${memory.recalled_count} 条旧记忆`);
           if (details.length) memoryToggleBtn.title = details.join("；");
         }
+        if (data.skill) {
+          resolvedSkillTitle = data.skill.title || data.skill.id || "科研问答";
+          if (skillSelect) skillSelect.title = data.skill.description || resolvedSkillTitle;
+        }
       },
       token: (data) => {
         if (answer === "" && statusEl) {
@@ -886,7 +1101,8 @@ ragQueryBtn?.addEventListener("click", async () => {
           bindCitationActions(citationsEl);
         }
         if (metaEl) {
-          metaEl.textContent = `置信度 ${data.confidence || "N/A"} · 命中 ${data.retrieval_hit ?? 0}`;
+          const skillTitle = data.skill?.title || resolvedSkillTitle;
+          metaEl.textContent = `${skillTitle ? `${skillTitle} · ` : ""}置信度 ${data.confidence || "N/A"} · 命中 ${data.retrieval_hit ?? 0}`;
         }
         if (healthRetrievalHit) healthRetrievalHit.textContent = String(data.retrieval_hit ?? 0);
         if (healthResponsePath) healthResponsePath.textContent = data.degraded ? "降级" : "Agent";
@@ -898,6 +1114,7 @@ ragQueryBtn?.addEventListener("click", async () => {
       done: () => {
         setBubbleStatus("", false);
         setStatus("已回复。");
+        refreshUsageSummary().catch(() => {});
       }
     });
     await refreshConversations();
@@ -1010,6 +1227,24 @@ modelSelect?.addEventListener("change", () => {
   if (healthModelName) healthModelName.textContent = modelSelect.value || "—";
 });
 
+skillSelect?.addEventListener("change", () => {
+  if (!skillSelect) return;
+  const skill = researchSkills.find((item) => item.id === skillSelect.value);
+  skillSelect.title = skill?.description || "系统将根据问题自动选择科研模式";
+});
+
+usageCostPill?.addEventListener("click", () => {
+  openUsagePanel().catch(() => {});
+});
+
+usageCloseBtn?.addEventListener("click", closeUsagePanel);
+usageModalBackdrop?.addEventListener("click", closeUsagePanel);
+document.addEventListener("keydown", (event) => {
+  if (event.key === "Escape" && usageModal && !usageModal.hidden) {
+    closeUsagePanel();
+  }
+});
+
 (async function boot() {
   if (!token) {
     location.replace("/login.html");
@@ -1021,6 +1256,8 @@ modelSelect?.addEventListener("change", () => {
     if (authUserLabel) authUserLabel.textContent = username;
     if (authUserAvatar) authUserAvatar.textContent = username.trim().slice(0, 1) || "研";
     await refreshHealth();
+    await refreshResearchSkills();
+    await refreshUsageSummary();
     await refreshLibraries();
     await refreshConversations();
     if (conversations[0]) {

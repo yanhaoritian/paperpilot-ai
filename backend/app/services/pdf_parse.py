@@ -5,6 +5,7 @@ from dataclasses import dataclass, field
 from typing import Any, Literal
 
 from app.config import get_settings
+from app.services.openai_client import chat_content
 
 logger = logging.getLogger(__name__)
 
@@ -262,15 +263,9 @@ def _vision_describe_page(png_bytes: bytes, page_no: int) -> str | None:
     try:
         import base64
 
-        import httpx
-
         b64 = base64.b64encode(png_bytes).decode("ascii")
         model = (settings.vision_model or "glm-4v-flash").strip()
-        url = f"{base}/chat/completions"
-        payload = {
-            "model": model,
-            "temperature": 0.2,
-            "messages": [
+        messages = [
                 {
                     "role": "user",
                     "content": [
@@ -287,18 +282,18 @@ def _vision_describe_page(png_bytes: bytes, page_no: int) -> str | None:
                         },
                     ],
                 }
-            ],
-        }
-        headers = {
-            "Authorization": f"Bearer {api_key}",
-            "Content-Type": "application/json",
-        }
-        with httpx.Client(timeout=90.0) as client:
-            resp = client.post(url, headers=headers, json=payload)
-            if resp.status_code >= 400:
-                logger.warning("vision describe HTTP %s %s", resp.status_code, resp.text[:200])
-                return None
-            return (resp.json()["choices"][0]["message"]["content"] or "").strip() or None
+            ]
+        return (
+            chat_content(
+                messages,
+                model=model,
+                base_url=base,
+                api_key=api_key,
+                temperature=0.2,
+                operation="vision_page",
+            ).strip()
+            or None
+        )
     except Exception:  # noqa: BLE001
         logger.exception("vision describe failed")
         return None

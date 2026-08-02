@@ -37,6 +37,14 @@ class Settings(BaseSettings):
     # api = remote OpenAI-compatible /embeddings; local = hashing fallback (no remote embed)
     embedding_provider: str = "api"
     embedding_retries: int = 3
+    # Ask OpenAI-compatible streaming endpoints to include a final usage
+    # object. Unsupported providers are retried once without this option.
+    chat_stream_include_usage: bool = True
+    ai_usage_tracking_enabled: bool = True
+    # JSON list of effective model prices. Values such as input_per_million
+    # are ordinary currency units; startup converts them to integer micro-units.
+    # Historical events retain their selected price version.
+    ai_model_prices_json: str = ""
 
     pdf_max_upload_mb: int = 32
     pdf_storage_dir: str = str(ROOT_DIR / "data" / "pdfs")

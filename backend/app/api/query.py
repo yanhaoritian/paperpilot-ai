@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -25,6 +25,11 @@ from app.services.response_cache import (
     make_query_cache_key,
     query_cache,
 )
+from app.services.research_skills import (
+    resolve_research_skill,
+    validate_skill_answer,
+)
+from app.services.usage_tracking import record_cache_hit, usage_scope
 
 router = APIRouter(prefix="/api", tags=["query"])
 
@@ -49,6 +54,7 @@ def _catalog_answer(db: Session, *, owner_id: str, library_ids: list[str]) -> Qu
 @router.post("/query", response_model=QueryResponse)
 def query_libraries(
     body: QueryRequest,
+    request: Request,
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> QueryResponse:
@@ -65,6 +71,14 @@ def query_libraries(
 
     question = body.question.strip()
     intent = detect_intent(question)
+    try:
+        skill = resolve_research_skill(
+            body.skill_id,
+            question=question,
+            intent=intent,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     settings = get_settings()
     if not settings.chat_model_is_allowed(body.model):
         raise HTTPException(status_code=400, detail="所选模型不在服务端允许列表中")
@@ -82,14 +96,26 @@ def query_libraries(
         intent=intent.value,
         corpus_revision=revision,
         prompt_version=settings.prompt_version,
+        skill_id=skill.id,
+        skill_version=skill.version,
     )
     if settings.response_cache_ttl_ms > 0:
         cached = query_cache().get(cache_key)
         if isinstance(cached, dict):
+            with usage_scope(
+                request_id=getattr(request.state, "request_id", None),
+                user_id=str(user.id),
+                skill_id=skill.id,
+                skill_version=skill.version,
+            ) as attribution:
+                record_cache_hit(
+                    model=body.model or settings.default_model,
+                    attribution=attribution,
+                )
             return QueryResponse(**cached)
 
     inventory = []
-    if intent == QueryIntent.COMPARE:
+    if intent == QueryIntent.COMPARE or skill.cover_all_documents:
         inventory = list_library_documents(db, owner_id=user.id, library_ids=library_ids)
         ready_count = sum(1 for item in inventory if item.status == "ready")
         if ready_count > settings.compare_max_documents:
@@ -105,6 +131,14 @@ def query_libraries(
 
     if intent == QueryIntent.CATALOG:
         result = _catalog_answer(db, owner_id=user.id, library_ids=library_ids)
+        result.skill_id = skill.id
+        result.skill_version = skill.version
+        result.skill_validation = {
+            "passed": True,
+            "warnings": [],
+            "citation_count": 0,
+            "missing_marker_groups": [],
+        }
         if settings.response_cache_ttl_ms > 0:
             query_cache().set(
                 cache_key,
@@ -120,30 +154,48 @@ def query_libraries(
         max_items=settings.inventory_prompt_max_documents,
     )
     compare = intent == QueryIntent.COMPARE
+    cover_documents = compare or skill.cover_all_documents
     cards_text = None
-    if compare or len(inventory) <= 3:
+    if cover_documents or len(inventory) <= 3:
         cards = ensure_document_snapshots(db, owner_id=user.id, library_ids=library_ids)
         cards_text = format_document_context_cards(cards)
-    retrieved = hybrid_retrieve(
-        db,
-        owner_id=user.id,
-        library_ids=library_ids,
-        question=question,
-        cover_all_docs=compare or len(inventory) <= 3,
-    )
-    result = generate_answer(
-        question,
-        retrieved,
-        model=body.model,
-        temperature=body.temperature,
-        inventory_text=inventory_text,
-        document_cards_text=cards_text,
-        intent_hint=(
-            "这是跨文献对比/共同点问题：必须覆盖文献清单与 Context 卡片中的各篇，禁止声称只检索到一篇。"
-            "排版：先自然段总述，异同处可用 Markdown 表格，最后一段小结；不要用 --- 装饰线。"
-            if compare
-            else None
-        ),
+    with usage_scope(
+        request_id=getattr(request.state, "request_id", None),
+        user_id=str(user.id),
+        skill_id=skill.id,
+        skill_version=skill.version,
+    ):
+        retrieved = hybrid_retrieve(
+            db,
+            owner_id=user.id,
+            library_ids=library_ids,
+            question=question,
+            cover_all_docs=cover_documents or len(inventory) <= 3,
+        )
+        intent_hints = [skill.retrieval_hint]
+        if compare:
+            intent_hints.append(
+                "这是跨文献对比/共同点问题：必须覆盖文献清单与 Context 卡片中的各篇，"
+                "禁止声称只检索到一篇。排版：先自然段总述，异同处可用 Markdown 表格，"
+                "最后一段小结；不要用 --- 装饰线。"
+            )
+        result = generate_answer(
+            question,
+            retrieved,
+            model=body.model,
+            temperature=body.temperature,
+            inventory_text=inventory_text,
+            document_cards_text=cards_text,
+            intent_hint="\n".join(intent_hints),
+            skill_prompt=skill.system_prompt(),
+        )
+    result["skill_id"] = skill.id
+    result["skill_version"] = skill.version
+    result["skill_validation"] = validate_skill_answer(
+        skill,
+        answer=str(result.get("answer") or ""),
+        citations=result.get("citations") or [],
+        degraded=bool(result.get("degraded")),
     )
     if settings.response_cache_ttl_ms > 0:
         query_cache().set(cache_key, result, ttl_ms=settings.response_cache_ttl_ms)
