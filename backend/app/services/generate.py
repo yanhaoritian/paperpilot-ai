@@ -12,6 +12,10 @@ from app.services.conversation_memory import (
 from app.services.openai_client import chat_json
 from app.services.prompt_budget import budget_history, clip_text
 from app.services.prompts import RAG_JSON_SYSTEM, RAG_STREAM_SYSTEM
+from app.services.research_skills import (
+    comparison_answer_violations,
+    sanitize_comparison_answer,
+)
 from app.services.retrieve import RetrievedChunk
 
 
@@ -42,6 +46,7 @@ def _format_context_grouped(
     *,
     include_ids: bool,
     max_chars: int | None = None,
+    balance_documents: bool = False,
 ) -> str:
     """Group retrieval hits by document so each paper has a clear Context section."""
     if not retrieved:
@@ -54,14 +59,17 @@ def _format_context_grouped(
             order.append(row.document_id)
         by_doc[row.document_id].append(row)
     raw_sections: list[str] = []
+    grouped_blocks: list[list[str]] = []
+    headers: list[str] = []
     weights: list[float] = []
     for i, did in enumerate(order, 1):
         rows = by_doc[did]
         name = rows[0].file_name
-        body = "\n\n".join(_format_context_block(r, include_ids=include_ids) for r in rows)
-        raw_sections.append(
-            f"#### 文献 {i}: 《{name}》（document_id={did}，片段数={len(rows)}）\n{body}"
-        )
+        header = f"#### 文献 {i}: 《{name}》（document_id={did}，片段数={len(rows)}）"
+        blocks = [_format_context_block(r, include_ids=include_ids) for r in rows]
+        headers.append(header)
+        grouped_blocks.append(blocks)
+        raw_sections.append(f"{header}\n" + "\n\n".join(blocks))
         weights.append(max(0.01, max(float(row.score or 0.0) for row in rows)))
 
     separator = "\n\n==========\n\n"
@@ -73,22 +81,53 @@ def _format_context_grouped(
     if not raw_sections or available <= 0:
         return clip_text(separator.join(raw_sections), limit)
 
-    base = min(600, max(80, available // max(1, len(raw_sections))))
-    if base * len(raw_sections) > available:
-        base = available // len(raw_sections)
-    remaining = max(0, available - base * len(raw_sections))
-    total_weight = sum(weights) or float(len(weights))
-    allocations = [
-        base + int(remaining * weight / total_weight)
-        for weight in weights
-    ]
+    if balance_documents:
+        # Comparison answers are only as strong as their least represented
+        # paper. Give every document the same prompt budget instead of letting
+        # a high-scoring paper starve lower-scoring papers of evidence.
+        allocations = [available // len(raw_sections) for _ in raw_sections]
+    else:
+        base = min(600, max(80, available // max(1, len(raw_sections))))
+        if base * len(raw_sections) > available:
+            base = available // len(raw_sections)
+        remaining = max(0, available - base * len(raw_sections))
+        total_weight = sum(weights) or float(len(weights))
+        allocations = [
+            base + int(remaining * weight / total_weight)
+            for weight in weights
+        ]
     rounding = available - sum(allocations)
     for index in range(rounding):
         allocations[index % len(allocations)] += 1
-    sections = [
-        clip_text(section, allocation)
-        for section, allocation in zip(raw_sections, allocations, strict=True)
-    ]
+
+    sections: list[str] = []
+    for header, blocks, raw_section, allocation in zip(
+        headers,
+        grouped_blocks,
+        raw_sections,
+        allocations,
+        strict=True,
+    ):
+        if not balance_documents or len(raw_section) <= allocation:
+            sections.append(clip_text(raw_section, allocation))
+            continue
+
+        # Preserve evidence diversity inside each paper as well. A single long
+        # abstract/introduction chunk must not consume the whole allocation and
+        # hide later method/data/result chunks.
+        header_text = f"{header}\n"
+        body_budget = max(0, allocation - len(header_text))
+        block_separator = "\n\n"
+        body_budget = max(0, body_budget - len(block_separator) * max(0, len(blocks) - 1))
+        block_allocations = [body_budget // len(blocks) for _ in blocks]
+        block_rounding = body_budget - sum(block_allocations)
+        for index in range(block_rounding):
+            block_allocations[index % len(block_allocations)] += 1
+        body = block_separator.join(
+            clip_text(block, block_allocation)
+            for block, block_allocation in zip(blocks, block_allocations, strict=True)
+        )
+        sections.append(clip_text(f"{header_text}{body}", allocation))
     return separator.join(sections)
 
 
@@ -110,6 +149,7 @@ def _build_user_payload(
     inventory_text: str | None = None,
     intent_hint: str | None = None,
     document_cards_text: str | None = None,
+    balance_documents: bool = False,
 ) -> str:
     settings = get_settings()
     prompt_limit = max(6_000, int(settings.rag_prompt_max_chars))
@@ -148,6 +188,7 @@ def _build_user_payload(
         retrieved,
         include_ids=include_ids,
         max_chars=context_budget,
+        balance_documents=balance_documents,
     )
     parts.extend(
         [
@@ -169,6 +210,7 @@ def build_rag_messages(
     intent_hint: str | None = None,
     document_cards_text: str | None = None,
     skill_prompt: str | None = None,
+    balance_documents: bool = False,
 ) -> list[dict[str, str]]:
     user = _build_user_payload(
         question,
@@ -177,6 +219,7 @@ def build_rag_messages(
         inventory_text=inventory_text,
         intent_hint=intent_hint,
         document_cards_text=document_cards_text,
+        balance_documents=balance_documents,
     )
     system = RAG_JSON_SYSTEM
     if skill_prompt:
@@ -194,6 +237,7 @@ def build_rag_stream_messages(
     intent_hint: str | None = None,
     document_cards_text: str | None = None,
     skill_prompt: str | None = None,
+    balance_documents: bool = False,
 ) -> list[dict[str, str]]:
     """Messages for plain-text streaming answers (citations attached separately)."""
     system = RAG_STREAM_SYSTEM
@@ -220,6 +264,7 @@ def build_rag_stream_messages(
                 inventory_text=inventory_text,
                 intent_hint=intent_hint,
                 document_cards_text=document_cards_text,
+                balance_documents=balance_documents,
             ),
         }
     )
@@ -267,24 +312,60 @@ def generate_answer(
     intent_hint: str | None = None,
     document_cards_text: str | None = None,
     skill_prompt: str | None = None,
+    balance_documents: bool = False,
 ) -> dict[str, Any]:
     if not retrieved:
         return empty_answer()
 
     by_id = {r.chunk_id: r for r in retrieved}
+    messages = build_rag_messages(
+        question,
+        retrieved,
+        inventory_text=inventory_text,
+        intent_hint=intent_hint,
+        document_cards_text=document_cards_text,
+        skill_prompt=skill_prompt,
+        balance_documents=balance_documents,
+    )
     raw = chat_json(
-        build_rag_messages(
-            question,
-            retrieved,
-            inventory_text=inventory_text,
-            intent_hint=intent_hint,
-            document_cards_text=document_cards_text,
-            skill_prompt=skill_prompt,
-        ),
+        messages,
         model=model,
         temperature=temperature,
         operation="answer_generate",
     )
+    draft_answer = str(raw.get("answer") or "").strip()
+    if balance_documents and (
+        not draft_answer or comparison_answer_violations(draft_answer)
+    ):
+        repair_messages = messages + [
+            {
+                "role": "assistant",
+                "content": json.dumps(raw, ensure_ascii=False),
+            },
+            {
+                "role": "user",
+                "content": (
+                    "上一版未通过多文献证据结构校验。请完整重写并仍严格输出原 JSON schema。"
+                    "删除含证据不足占位语的表格列，只保留每篇都有原文支持的维度；所有缺失项"
+                    "集中写入一次“证据缺口”，并说明本轮未检索到不等于论文未报告。"
+                ),
+            },
+        ]
+        try:
+            repaired = chat_json(
+                repair_messages,
+                model=model,
+                temperature=0.0,
+                operation="answer_repair",
+            )
+            if str(repaired.get("answer") or "").strip():
+                if not repaired.get("citations") and raw.get("citations"):
+                    repaired["citations"] = raw["citations"]
+                raw = repaired
+        except Exception:  # noqa: BLE001
+            # The original evidence-grounded draft remains available for the
+            # deterministic sanitizer below.
+            pass
 
     citations_in = raw.get("citations") if isinstance(raw.get("citations"), list) else []
     citations: list[dict[str, Any]] = []
@@ -324,6 +405,8 @@ def generate_answer(
     answer = str(raw.get("answer") or "").strip()
     if not answer:
         answer = "无法从文献中得出可靠结论。"
+    elif balance_documents and comparison_answer_violations(answer):
+        answer = sanitize_comparison_answer(answer)
 
     return {
         "answer": answer,

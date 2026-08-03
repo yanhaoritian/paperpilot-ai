@@ -89,12 +89,13 @@ class Settings(BaseSettings):
     memory_recall_min_score: float = 0.18
     # Guardrails against unbounded all-document prompts.
     compare_max_documents: int = 12
+    compare_chunks_per_document: int = 4
     inventory_prompt_max_documents: int = 50
 
     # Identical query answer cache (ms). 0 = disabled.
     response_cache_ttl_ms: int = 600_000
     # Bump whenever answer/retrieval prompts change incompatibly.
-    prompt_version: str = "2026-07-31-memory-v1"
+    prompt_version: str = "2026-08-03-comparison-evidence-v2"
 
     rate_limit_window_seconds: int = 900
     rate_limit_auth_max: int = 30

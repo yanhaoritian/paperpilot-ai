@@ -11,7 +11,10 @@ from app.models import Library, User
 from app.schemas import QueryRequest, QueryResponse
 from app.services.doc_context import ensure_document_snapshots, format_document_context_cards
 from app.services.generate import generate_answer
-from app.services.hybrid_retrieve import hybrid_retrieve
+from app.services.hybrid_retrieve import (
+    format_comparison_evidence_coverage,
+    hybrid_retrieve,
+)
 from app.services.intent import (
     QueryIntent,
     detect_intent,
@@ -154,6 +157,7 @@ def query_libraries(
         max_items=settings.inventory_prompt_max_documents,
     )
     compare = intent == QueryIntent.COMPARE
+    comparison_mode = compare or skill.id == "multi_paper_synthesis"
     cover_documents = compare or skill.cover_all_documents
     cards_text = None
     if cover_documents or len(inventory) <= 3:
@@ -171,13 +175,29 @@ def query_libraries(
             library_ids=library_ids,
             question=question,
             cover_all_docs=cover_documents or len(inventory) <= 3,
+            coverage_per_doc=(
+                max(2, int(settings.compare_chunks_per_document))
+                if comparison_mode
+                else 2
+            ),
         )
         intent_hints = [skill.retrieval_hint]
-        if compare:
+        if comparison_mode:
             intent_hints.append(
-                "这是跨文献对比/共同点问题：必须覆盖文献清单与 Context 卡片中的各篇，"
-                "禁止声称只检索到一篇。排版：先自然段总述，异同处可用 Markdown 表格，"
+                "这是跨文献对比/共同点问题：必须覆盖文献清单与 Context 卡片中 status=ready "
+                "的各篇；未完成索引的文献只说明状态，不纳入内容比较。禁止声称只检索到一篇。"
+                "排版：先自然段总述，异同处可用 Markdown 表格，"
                 "最后一段小结；不要用 --- 装饰线。"
+            )
+            intent_hints.append(
+                format_comparison_evidence_coverage(
+                    retrieved,
+                    expected_documents=[
+                        (item.document_id, item.file_name)
+                        for item in inventory
+                        if item.status == "ready"
+                    ],
+                )
             )
         result = generate_answer(
             question,
@@ -188,6 +208,7 @@ def query_libraries(
             document_cards_text=cards_text,
             intent_hint="\n".join(intent_hints),
             skill_prompt=skill.system_prompt(),
+            balance_documents=comparison_mode,
         )
     result["skill_id"] = skill.id
     result["skill_version"] = skill.version
@@ -197,6 +218,12 @@ def query_libraries(
         citations=result.get("citations") or [],
         degraded=bool(result.get("degraded")),
     )
-    if settings.response_cache_ttl_ms > 0:
+    if (
+        settings.response_cache_ttl_ms > 0
+        and (
+            skill.id != "multi_paper_synthesis"
+            or bool(result["skill_validation"].get("passed"))
+        )
+    ):
         query_cache().set(cache_key, result, ttl_ms=settings.response_cache_ttl_ms)
     return QueryResponse(**result)

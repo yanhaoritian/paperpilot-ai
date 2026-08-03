@@ -18,7 +18,11 @@ from app.services.conversation_memory import (
 )
 from app.services.document_storage import resolve_document_path
 from app.services.generate import citations_from_retrieved, empty_answer
-from app.services.hybrid_retrieve import hybrid_retrieve
+from app.services.hybrid_retrieve import (
+    comparison_evidence_coverage,
+    format_comparison_evidence_coverage,
+    hybrid_retrieve,
+)
 from app.services.intent import (
     QueryIntent,
     detect_intent,
@@ -30,6 +34,10 @@ from app.services.openai_client import chat_json, chat_stream
 from app.services.prompt_budget import budget_history, clip_text
 from app.services.pdf_parse import parse_pdf_pages
 from app.services.prompts import RAG_AGENT_FINAL_SYSTEM
+from app.services.research_skills import (
+    comparison_answer_violations,
+    sanitize_comparison_answer,
+)
 from app.services.structure import extract_tables_from_page_text
 
 logger = logging.getLogger(__name__)
@@ -516,6 +524,7 @@ def iter_agent_events(
     )
     compare = intent == QueryIntent.COMPARE
     cover_documents = compare or force_document_coverage
+    comparison_mode = compare or force_document_coverage
     cards_text = None
     if cover_documents or len(inventory) <= 3:
         cards = ensure_document_snapshots(db, owner_id=owner_id, library_ids=library_ids)
@@ -574,6 +583,11 @@ def iter_agent_events(
             library_ids=library_ids,
             question=retrieval_question,
             cover_all_docs=cover_documents or len(inventory) <= 3,
+            coverage_per_doc=(
+                max(2, int(settings.compare_chunks_per_document))
+                if comparison_mode
+                else 2
+            ),
             top_k=max(settings.rag_top_k, 8) if cover_documents else None,
             query_vector=conversation_context.query_vector,
         )
@@ -592,7 +606,21 @@ def iter_agent_events(
                 },
             )
             return
-        yield ("meta", {"retrieval_hit": len(rows)})
+        expected_compare_documents = [
+            (item.document_id, item.file_name)
+            for item in inventory
+            if item.status == "ready"
+        ] if comparison_mode else []
+        comparison_coverage = (
+            comparison_evidence_coverage(rows) if comparison_mode else None
+        )
+        if comparison_coverage is not None:
+            for document_id, _file_name in expected_compare_documents:
+                comparison_coverage.setdefault(document_id, [])
+        meta_payload: dict[str, Any] = {"retrieval_hit": len(rows)}
+        if comparison_coverage is not None:
+            meta_payload["comparison_evidence_coverage"] = comparison_coverage
+        yield ("meta", meta_payload)
         yield (
             "status",
             {"phase": "generating", "text": f"已命中 {len(rows)} 段（覆盖多篇文献），正在生成…"},
@@ -600,10 +628,12 @@ def iter_agent_events(
         from app.services.generate import build_rag_stream_messages
 
         intent_hint = (
-            "这是跨文献对比/共同点问题：必须覆盖文献清单中的各篇；"
-            "禁止声称只检索到一篇；某篇证据不足时单独说明，不得否认该篇在库中。"
+            "这是跨文献对比/共同点问题：必须覆盖文献清单中 status=ready 的各篇；"
+            "未完成索引的文献只说明状态，不纳入内容比较。禁止声称只检索到一篇；"
+            "某篇证据不足时单独说明，不得否认该篇在库中。"
             "排版：先自然段总述，异同处可用 Markdown 表格，最后一段小结；不要用 --- 装饰线。"
-            if compare
+            f"\n{format_comparison_evidence_coverage(rows, expected_documents=expected_compare_documents)}"
+            if comparison_mode
             else None
         )
         messages = build_rag_stream_messages(
@@ -615,20 +645,82 @@ def iter_agent_events(
             document_cards_text=cards_text,
             intent_hint=intent_hint,
             skill_prompt=skill_prompt,
+            balance_documents=comparison_mode,
         )
         parts: list[str] = []
-        for tok in chat_stream(
-            messages,
-            model=model,
-            temperature=temperature,
-            operation="answer_generate",
-        ):
-            if tok is None:
-                yield ("heartbeat", {"phase": "model"})
-                continue
-            parts.append(tok)
-            yield ("token", {"text": tok})
-        answer = "".join(parts).strip()
+        if comparison_mode:
+            # Buffer compare answers until their table/evidence contract has
+            # passed. Otherwise an invalid table is already visible in the UI
+            # before a repair can replace it.
+            for tok in chat_stream(
+                messages,
+                model=model,
+                temperature=temperature,
+                operation="answer_generate",
+            ):
+                if tok is None:
+                    yield ("heartbeat", {"phase": "model"})
+                    continue
+                parts.append(tok)
+            answer = "".join(parts).strip()
+            violations = comparison_answer_violations(answer)
+            if not answer or violations:
+                yield (
+                    "status",
+                    {
+                        "phase": "repairing",
+                        "text": "正在校验多文献证据并修订对照结构…",
+                    },
+                )
+                repair_messages = messages + [
+                    {"role": "assistant", "content": answer},
+                    {
+                        "role": "user",
+                        "content": (
+                            "上一版未通过证据结构校验。请完整重写答案：删除含有证据不足占位语的"
+                            "表格列，只保留每篇都有原文支持的可比维度；把缺失项集中写入一次"
+                            "“证据缺口”，并明确本轮未检索到不等于论文未报告。不要解释修订过程。"
+                        ),
+                    },
+                ]
+                repaired_parts: list[str] = []
+                try:
+                    for tok in chat_stream(
+                        repair_messages,
+                        model=model,
+                        temperature=0.0,
+                        operation="answer_repair",
+                    ):
+                        if tok is None:
+                            yield ("heartbeat", {"phase": "repair"})
+                            continue
+                        repaired_parts.append(tok)
+                except Exception:  # noqa: BLE001
+                    logger.exception("comparison answer repair failed; sanitizing draft")
+                repaired = "".join(repaired_parts).strip()
+                if repaired:
+                    answer = repaired
+            if comparison_answer_violations(answer):
+                answer = sanitize_comparison_answer(answer)
+            if not answer:
+                answer = empty_answer()["answer"]
+            parts = [answer]
+            replay_step = max(32, len(answer) // 80 or 32)
+            for offset in range(0, len(answer), replay_step):
+                yield ("token", {"text": answer[offset : offset + replay_step]})
+        else:
+            for tok in chat_stream(
+                messages,
+                model=model,
+                temperature=temperature,
+                operation="answer_generate",
+            ):
+                if tok is None:
+                    yield ("heartbeat", {"phase": "model"})
+                    continue
+                parts.append(tok)
+                yield ("token", {"text": tok})
+            answer = "".join(parts).strip()
         cites = citations_from_retrieved(rows, limit=max(6, len(rows)))
         yield (
             "final",
@@ -639,6 +731,7 @@ def iter_agent_events(
                 "degraded": False,
                 "confidence": "medium",
                 "memory": memory_meta,
+                "comparison_evidence_coverage": comparison_coverage,
             },
         )
         return

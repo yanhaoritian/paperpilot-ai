@@ -567,6 +567,10 @@ def post_message_stream(
             and cacheable
             and cache_key
             and not final_payload.get("degraded")
+            and (
+                skill_id != "multi_paper_synthesis"
+                or bool(skill_validation.get("passed"))
+            )
         ):
             query_cache().set(
                 cache_key,

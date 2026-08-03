@@ -154,6 +154,36 @@ def test_context_budget_preserves_each_document_entry():
         assert f"paper_{i}.pdf" in context
 
 
+def test_balanced_comparison_context_preserves_facets_for_every_document():
+    rows: list[RetrievedChunk] = []
+    for doc_index, score in ((1, 0.99), (2, 0.5), (3, 0.01)):
+        for facet_index, facet in enumerate(("METHOD", "DATA", "RESULT")):
+            rows.append(
+                _chunk(
+                    chunk_id=f"d{doc_index}-{facet.lower()}",
+                    document_id=f"d{doc_index}",
+                    file_name=f"paper_{doc_index}.pdf",
+                    text=f"DOC{doc_index}_{facet} " + ("长片段" * 350),
+                    chunk_index=facet_index,
+                    score=score,
+                    section_path=facet.title(),
+                )
+            )
+
+    context = _format_context_grouped(
+        rows,
+        include_ids=False,
+        max_chars=3600,
+        balance_documents=True,
+    )
+
+    assert len(context) <= 3600
+    for doc_index in range(1, 4):
+        assert f"paper_{doc_index}.pdf" in context
+        for facet in ("METHOD", "DATA", "RESULT"):
+            assert f"DOC{doc_index}_{facet}" in context
+
+
 def test_history_budget_keeps_newest_turns():
     history = [
         {"role": "user", "content": "旧问题" * 100},

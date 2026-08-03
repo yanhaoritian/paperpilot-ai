@@ -48,7 +48,7 @@ class ResearchSkill:
         }
 
 
-SKILL_VERSION = "2026-08-02-v1"
+SKILL_VERSION = "2026-08-03-v2"
 
 _SKILLS: tuple[ResearchSkill, ...] = (
     ResearchSkill(
@@ -96,13 +96,16 @@ _SKILLS: tuple[ResearchSkill, ...] = (
         title="多文献对比综述",
         description="跨多篇论文建立证据矩阵，辨析共同点、差异、冲突和研究空白。",
         output_contract=(
-            "先给出综合结论，再使用 Markdown 对照表逐篇覆盖所选文献，至少比较研究问题、方法、"
-            "数据/样本、指标、主要结果和局限。把一致结论、冲突结论与证据空白分开说明；某篇"
-            "证据不足时保留该篇并标注缺口，不得删除或假称它不存在。表后给出可由证据支持的"
-            "研究趋势与空白，禁止臆造引用。"
+            "先给出综合结论，并优先核对每篇文献的研究问题、方法、数据/样本、评价指标、主要"
+            "结果和局限。Markdown 主表只保留当前证据充分且适合横向比较的维度，不得为了凑齐"
+            "六个维度而生成空列，也不得在多个单元格中反复填写“未在检索片段中提及、无法判断、"
+            "未报告”等占位语。所有缺失项统一放在表后的一次“证据缺口”说明中；明确本轮未检索"
+            "到不等于论文未报告，并给出建议补查的章节。若没有足够可比维度，可省略主表。表后"
+            "再说明一致结论、冲突结论、研究趋势与空白，禁止臆造引用。"
         ),
         retrieval_hint=(
-            "对所选文献执行覆盖优先检索；每篇至少保留相关证据，再进行跨文献精排。"
+            "对所选文献执行覆盖优先检索；优先查找研究问题、方法、数据/样本、评价指标、主要"
+            "结果和局限，每篇先保留相关证据，再进行跨文献精排。"
         ),
         cover_all_documents=True,
         required_marker_groups=(
@@ -218,9 +221,188 @@ def validate_skill_answer(
     if missing_groups:
         warnings.append("missing_required_sections")
 
+    if skill.id == "multi_paper_synthesis":
+        comparison_warnings = comparison_answer_violations(text)
+        table_placeholder_count = _comparison_table_placeholder_count(text)
+        warnings.extend(comparison_warnings)
+
     return {
         "passed": not warnings,
         "warnings": warnings,
         "citation_count": citation_count,
         "missing_marker_groups": missing_groups,
+        "comparison_placeholder_cells": (
+            table_placeholder_count
+            if skill.id == "multi_paper_synthesis"
+            else 0
+        ),
     }
+
+
+_TABLE_PLACEHOLDER_RE = re.compile(
+    r"^(?:[-—–/]|n\s*/?\s*a|无|未知|不详|无法判断|无法比较|"
+    r"未(?:在)?(?:当前|本轮)?(?:检索)?(?:片段|证据|结果)?中?"
+    r"(?:提及|找到|检索到|体现|显示|说明|反映)|"
+    r"原文未找到|证据不足|论文未报告|文中未报告|作者未报告)$",
+    re.I,
+)
+_TABLE_GAP_PHRASE_RE = re.compile(
+    r"未(?:在)?(?:当前|本轮)?(?:检索)?(?:片段|证据|结果)?中?"
+    r"(?:明确|直接|充分)?(?:提及|找到|检索到|体现|显示|说明|反映)|"
+    r"无法判断|无法比较|证据不足",
+    re.I,
+)
+_NOT_REPORTED_RE = re.compile(r"(?:论文|文中|作者|原文).{0,4}未(?:予以)?报告")
+_NOT_REPORTED_NEGATION_RE = re.compile(
+    r"(?:不等于|≠|不代表|并不表示|不能据此(?:断定|认定)?|不可据此(?:断定|认定)?)"
+    r".{0,12}(?:论文|文中|作者|原文).{0,4}未(?:予以)?报告"
+)
+
+
+def _markdown_table_data_cells(text: str) -> list[str]:
+    cells: list[str] = []
+    in_table = False
+    saw_header = False
+    for raw_line in (text or "").splitlines():
+        line = raw_line.strip()
+        if line.count("|") < 2:
+            in_table = False
+            saw_header = False
+            continue
+        normalized = line.strip("|").strip()
+        row = [cell.strip() for cell in normalized.split("|")]
+        if row and all(re.fullmatch(r":?-{3,}:?", cell.replace(" ", "")) for cell in row):
+            in_table = True
+            saw_header = True
+            continue
+        if not saw_header:
+            # First pipe row is the table header. Data rows only follow a
+            # Markdown separator, so prose containing pipes is not inspected.
+            continue
+        if in_table:
+            cells.extend(row[1:] if len(row) > 1 else row)
+    return cells
+
+
+def _comparison_table_placeholder_count(text: str) -> int:
+    count = 0
+    for cell in _markdown_table_data_cells(text):
+        if _is_placeholder_cell(cell):
+            count += 1
+    return count
+
+
+def _has_unsupported_not_reported_claim(text: str) -> bool:
+    scrubbed = _NOT_REPORTED_NEGATION_RE.sub("", text or "")
+    return bool(_NOT_REPORTED_RE.search(scrubbed))
+
+
+def comparison_answer_violations(text: str) -> list[str]:
+    """Return repairable compare-format violations in deterministic order."""
+    warnings: list[str] = []
+    if _comparison_table_placeholder_count(text):
+        warnings.append("comparison_placeholder_cells")
+    if _has_unsupported_not_reported_claim(text):
+        warnings.append("unsupported_not_reported_claim")
+    return warnings
+
+
+def _table_row(line: str) -> list[str]:
+    return [cell.strip() for cell in line.strip().strip("|").split("|")]
+
+
+def _is_table_separator(cells: list[str]) -> bool:
+    return bool(cells) and all(
+        re.fullmatch(r":?-{3,}:?", cell.replace(" ", ""))
+        for cell in cells
+    )
+
+
+def _is_placeholder_cell(cell: str) -> bool:
+    compact = re.sub(r"[。；;，,]+$", "", cell.strip().strip("*_` "))
+    return (
+        not compact
+        or _TABLE_PLACEHOLDER_RE.fullmatch(compact) is not None
+        or _TABLE_GAP_PHRASE_RE.search(compact) is not None
+    )
+
+
+def _replace_unsupported_not_reported(text: str) -> str:
+    safe_spans = [match.span() for match in _NOT_REPORTED_NEGATION_RE.finditer(text)]
+    matches = list(_NOT_REPORTED_RE.finditer(text))
+    for match in reversed(matches):
+        if any(start <= match.start() and match.end() <= end for start, end in safe_spans):
+            continue
+        replacement = "本轮未检索到足以判断该项的原文证据（不等于论文未报告）"
+        text = text[: match.start()] + replacement + text[match.end() :]
+    return text
+
+
+def sanitize_comparison_answer(text: str) -> str:
+    """Deterministically remove placeholder columns after a failed LLM repair.
+
+    This is a last-resort format guard. It never fills missing facts; it keeps
+    supported table columns and moves detected gaps into one consolidated note.
+    """
+    lines = (text or "").splitlines()
+    output: list[str] = []
+    gaps: list[str] = []
+    index = 0
+    while index < len(lines):
+        if index + 1 >= len(lines) or lines[index].count("|") < 2:
+            output.append(lines[index])
+            index += 1
+            continue
+        header = _table_row(lines[index])
+        separator = _table_row(lines[index + 1])
+        if not _is_table_separator(separator) or len(separator) != len(header):
+            output.append(lines[index])
+            index += 1
+            continue
+
+        end = index + 2
+        data_rows: list[list[str]] = []
+        while end < len(lines) and lines[end].count("|") >= 2:
+            row = _table_row(lines[end])
+            if len(row) != len(header):
+                break
+            data_rows.append(row)
+            end += 1
+
+        bad_columns: set[int] = set()
+        for column in range(1, len(header)):
+            for row in data_rows:
+                if _is_placeholder_cell(row[column]):
+                    bad_columns.add(column)
+                    document = row[0] or "未命名文献"
+                    gaps.append(f"{document}的{header[column] or '对应维度'}")
+
+        keep_columns = [
+            column for column in range(len(header)) if column not in bad_columns
+        ]
+        if data_rows and len(keep_columns) >= 2:
+            output.append("| " + " | ".join(header[column] for column in keep_columns) + " |")
+            output.append(
+                "| "
+                + " | ".join(separator[column] for column in keep_columns)
+                + " |"
+            )
+            for row in data_rows:
+                output.append(
+                    "| " + " | ".join(row[column] for column in keep_columns) + " |"
+                )
+        index = end
+
+    cleaned = _replace_unsupported_not_reported("\n".join(output)).strip()
+    unique_gaps = list(dict.fromkeys(gap for gap in gaps if gap))
+    if unique_gaps:
+        note = (
+            "本轮未检索到足以支持以下横向比较项的原文证据："
+            + "、".join(unique_gaps)
+            + "。这不等于论文未报告；建议补查对应方法、结果、讨论或附录章节。"
+        )
+        if "证据缺口" in cleaned:
+            cleaned += f"\n\n结构校验补充：{note}"
+        else:
+            cleaned += f"\n\n证据缺口：{note}"
+    return cleaned
