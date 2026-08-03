@@ -2,7 +2,22 @@ FROM python:3.12-slim
 
 WORKDIR /app
 
-RUN apt-get update && apt-get install -y --no-install-recommends \
+# Debian's official CDN is frequently slow or unreachable from mainland-China
+# hosts. Keep the mirror configurable, but default production builds to Aliyun
+# and fail within a bounded time instead of hanging indefinitely.
+ARG DEBIAN_MIRROR=https://mirrors.aliyun.com
+RUN sed -i \
+      -e "s|http://deb.debian.org/debian-security|${DEBIAN_MIRROR}/debian-security|g" \
+      -e "s|https://deb.debian.org/debian-security|${DEBIAN_MIRROR}/debian-security|g" \
+      -e "s|http://deb.debian.org/debian|${DEBIAN_MIRROR}/debian|g" \
+      -e "s|https://deb.debian.org/debian|${DEBIAN_MIRROR}/debian|g" \
+      /etc/apt/sources.list.d/debian.sources \
+    && apt-get \
+      -o Acquire::Retries=5 \
+      -o Acquire::http::Timeout=30 \
+      -o Acquire::https::Timeout=30 \
+      update \
+    && apt-get install -y --no-install-recommends \
     libgl1 \
     libglib2.0-0 \
     libxcb1 \
