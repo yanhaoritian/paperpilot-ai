@@ -6,8 +6,10 @@ import logging
 import math
 import threading
 import time
+from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any
+from urllib.parse import urlsplit
 
 import httpx
 
@@ -23,6 +25,8 @@ from app.services.usage_tracking import (
 )
 
 logger = logging.getLogger(__name__)
+
+_CHAT_STREAM_HEARTBEAT_SECONDS = 10.0
 
 _client_lock = threading.Lock()
 _chat_client: httpx.Client | None = None
@@ -74,6 +78,40 @@ def _embed_headers() -> dict[str, str]:
 
 def _chat_base_url() -> str:
     return get_settings().openai_base_url.rstrip("/")
+
+
+def _deepseek_thinking_option(
+    *,
+    base_url: str,
+    model: str,
+    enabled: bool,
+) -> dict[str, str] | None:
+    """Return DeepSeek's thinking toggle only for its official chat API."""
+    try:
+        hostname = (urlsplit(base_url).hostname or "").lower().rstrip(".")
+    except ValueError:
+        return None
+    if hostname != "api.deepseek.com":
+        return None
+    if not (model or "").strip().lower().startswith("deepseek-"):
+        return None
+    return {"type": "enabled" if enabled else "disabled"}
+
+
+def _apply_deepseek_thinking(
+    payload: dict[str, Any],
+    *,
+    settings: Any,
+    base_url: str,
+    model: str,
+) -> None:
+    option = _deepseek_thinking_option(
+        base_url=base_url,
+        model=model,
+        enabled=bool(settings.deepseek_thinking_enabled),
+    )
+    if option is not None:
+        payload["thinking"] = option
 
 
 def _embed_base_url() -> str:
@@ -282,6 +320,12 @@ def chat_json(
         "messages": messages,
         "response_format": {"type": "json_object"},
     }
+    _apply_deepseek_thinking(
+        payload,
+        settings=settings,
+        base_url=_chat_base_url(),
+        model=resolved_model,
+    )
     client = _get_chat_client()
     attribution = current_usage_attribution()
     provider = provider_from_base_url(_chat_base_url())
@@ -358,8 +402,8 @@ def chat_stream(
     model: str | None = None,
     temperature: float = 0.2,
     operation: str = "answer_generate",
-):
-    """Yield text deltas from OpenAI-compatible chat completions stream."""
+) -> Iterator[str | None]:
+    """Yield content deltas; ``None`` is a throttled transport heartbeat."""
     settings = get_settings()
     url = f"{_chat_base_url()}/chat/completions"
     resolved_model = model or settings.default_model
@@ -369,10 +413,17 @@ def chat_stream(
         "messages": messages,
         "stream": True,
     }
+    _apply_deepseek_thinking(
+        base_payload,
+        settings=settings,
+        base_url=_chat_base_url(),
+        model=resolved_model,
+    )
     client = _get_chat_client()
     attribution = current_usage_attribution()
     provider = provider_from_base_url(_chat_base_url())
     started = time.perf_counter()
+    last_heartbeat_at = started
     output_parts: list[str] = []
     usage_payload: dict[str, Any] | None = None
     provider_request_id: str | None = None
@@ -401,6 +452,12 @@ def chat_stream(
                 for line in resp.iter_lines():
                     if not line:
                         continue
+                    if line.startswith(":"):
+                        now = time.perf_counter()
+                        if now - last_heartbeat_at >= _CHAT_STREAM_HEARTBEAT_SECONDS:
+                            last_heartbeat_at = now
+                            yield None
+                        continue
                     if line.startswith("data:"):
                         data = line[5:].strip()
                     else:
@@ -422,6 +479,11 @@ def chat_stream(
                     if text:
                         output_parts.append(text)
                         yield text
+                    elif delta.get("reasoning_content"):
+                        now = time.perf_counter()
+                        if now - last_heartbeat_at >= _CHAT_STREAM_HEARTBEAT_SECONDS:
+                            last_heartbeat_at = now
+                            yield None
                 status = "success"
                 completed = True
                 break

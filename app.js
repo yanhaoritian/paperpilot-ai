@@ -645,29 +645,62 @@ async function parseSseStream(resp, handlers) {
   const reader = resp.body.getReader();
   const decoder = new TextDecoder();
   let buffer = "";
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    buffer += decoder.decode(value, { stream: true });
-    const parts = buffer.split("\n\n");
-    buffer = parts.pop() || "";
-    for (const block of parts) {
-      let event = "message";
-      const dataLines = [];
-      for (const line of block.split("\n")) {
-        if (line.startsWith("event:")) event = line.slice(6).trim();
-        else if (line.startsWith("data:")) dataLines.push(line.slice(5).trim());
-      }
-      if (!dataLines.length) continue;
-      let data = null;
+  let sawError = false;
+  let sawDone = false;
+  let lastErrorDetail = "";
+  let donePayload = null;
+  try {
+    while (true) {
+      let chunk;
       try {
-        data = JSON.parse(dataLines.join("\n"));
-      } catch {
-        continue;
+        chunk = await reader.read();
+      } catch (error) {
+        if (error?.name === "AbortError") {
+          throw new Error("回答请求已取消。");
+        }
+        throw new Error("回答连接已中断，请检查网络后重试。");
       }
-      const fn = handlers[event];
-      if (fn) fn(data);
+      const { done, value } = chunk;
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      const parts = buffer.split("\n\n");
+      buffer = parts.pop() || "";
+      for (const block of parts) {
+        let event = "message";
+        const dataLines = [];
+        for (const line of block.split("\n")) {
+          if (line.startsWith("event:")) event = line.slice(6).trim();
+          else if (line.startsWith("data:")) dataLines.push(line.slice(5).trim());
+        }
+        if (!dataLines.length) continue;
+        let data = null;
+        try {
+          data = JSON.parse(dataLines.join("\n"));
+        } catch {
+          continue;
+        }
+        if (event === "error") {
+          sawError = true;
+          lastErrorDetail = String(data?.detail || "流式生成出错");
+        } else if (event === "done") {
+          sawDone = true;
+          donePayload = data;
+          if (data?.ok === false) sawError = true;
+        }
+        const fn = handlers[event];
+        if (fn) fn(data);
+      }
     }
+    if (!sawDone) {
+      throw new Error(
+        sawError && lastErrorDetail
+          ? `回答生成失败：${lastErrorDetail}`
+          : "回答连接已中断：服务端未发送完成信号，请重试。"
+      );
+    }
+    return { sawError, sawDone, done: donePayload, errorDetail: lastErrorDetail };
+  } finally {
+    reader.releaseLock();
   }
 }
 
@@ -1057,6 +1090,7 @@ ragQueryBtn?.addEventListener("click", async () => {
   appendChat("user", `<p>${escapeHtml(question)}</p>`);
   ragQuestion.value = "";
   streaming = true;
+  if (healthResponsePath) healthResponsePath.textContent = "处理中";
   if (ragQueryBtn) ragQueryBtn.disabled = true;
   updateMemoryControl();
 
@@ -1072,6 +1106,8 @@ ragQueryBtn?.addEventListener("click", async () => {
   const citationsEl = bubble.querySelector(".stream-citations");
   const metaEl = bubble.querySelector(".bubble-meta");
   let resolvedSkillTitle = "";
+  let streamFailed = false;
+  let streamFailureMessage = "";
 
   const setBubbleStatus = (text, active = true) => {
     if (!statusEl) return;
@@ -1160,10 +1196,25 @@ ragQueryBtn?.addEventListener("click", async () => {
         if (healthResponsePath) healthResponsePath.textContent = data.degraded ? "降级" : "Agent";
       },
       error: (data) => {
-        setBubbleStatus(data.detail || "流式生成出错", true);
-        setStatus(data.detail || "流式生成出错", true);
+        streamFailed = true;
+        streamFailureMessage = data.detail || "流式生成出错";
+        if (healthResponsePath) healthResponsePath.textContent = "异常";
+        setBubbleStatus(streamFailureMessage, false);
+        setStatus(streamFailureMessage, true);
       },
-      done: () => {
+      done: (data) => {
+        if (data?.ok === false) {
+          streamFailed = true;
+          streamFailureMessage = data.detail || streamFailureMessage || "回答生成失败，请重试。";
+          if (healthResponsePath) healthResponsePath.textContent = "异常";
+          setBubbleStatus(streamFailureMessage, false);
+          setStatus(streamFailureMessage, true);
+          return;
+        }
+        if (streamFailed) {
+          setBubbleStatus(streamFailureMessage || "回答生成失败，请重试。", false);
+          return;
+        }
         setBubbleStatus("", false);
         setStatus("已回复。");
         refreshUsageSummary().catch(() => {});
@@ -1171,10 +1222,20 @@ ragQueryBtn?.addEventListener("click", async () => {
     });
     await refreshConversations();
   } catch (e) {
-    setBubbleStatus("", false);
-    if (textEl && !textEl.textContent.trim()) textEl.innerHTML = formatAnswerHtml(e.message);
-    else appendChat("assistant", formatAnswerHtml(e.message));
-    setStatus(e.message, true);
+    const message = e?.message || "回答连接已中断，请重试。";
+    if (healthResponsePath) {
+      healthResponsePath.textContent = message.includes("连接") ? "中断" : "异常";
+    }
+    if (!streamFailed) {
+      streamFailed = true;
+      streamFailureMessage = message;
+      setBubbleStatus(message, false);
+      if (textEl && !textEl.textContent.trim()) textEl.innerHTML = formatAnswerHtml(message);
+      else appendChat("assistant", formatAnswerHtml(message));
+    } else {
+      setBubbleStatus(streamFailureMessage || message, false);
+    }
+    setStatus(streamFailureMessage || message, true);
   } finally {
     streaming = false;
     updateQueryReady();

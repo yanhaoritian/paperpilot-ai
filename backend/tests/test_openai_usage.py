@@ -131,3 +131,89 @@ def test_empty_provider_usage_is_marked_as_estimated(monkeypatch):
     )
     assert captured[0]["usage_source"] == "estimated"
     assert captured[0]["total_tokens"] > 0
+
+
+def test_chat_json_disables_thinking_for_official_deepseek_by_default(monkeypatch):
+    response = _Response(
+        {
+            "choices": [{"message": {"content": '{"answer":"ok"}'}}],
+            "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+        }
+    )
+    client = _Client(response)
+    settings = openai_client.get_settings()
+    monkeypatch.setattr(settings, "openai_api_key", "test-key")
+    monkeypatch.setattr(settings, "openai_base_url", "https://api.deepseek.com/v1/")
+    monkeypatch.setattr(settings, "default_model", "deepseek-v4-flash")
+    monkeypatch.setattr(settings, "deepseek_thinking_enabled", False)
+    monkeypatch.setattr(openai_client, "_get_chat_client", lambda: client)
+    monkeypatch.setattr(openai_client, "record_ai_usage", lambda **_kwargs: None)
+
+    assert openai_client.chat_json([{"role": "user", "content": "question"}]) == {
+        "answer": "ok"
+    }
+    assert client.last_payload["thinking"] == {"type": "disabled"}
+
+
+def test_chat_stream_can_explicitly_enable_deepseek_thinking(monkeypatch):
+    response = _Response(
+        {},
+        lines=[
+            'data: {"choices":[{"delta":{"content":"answer"}}]}',
+            "data: [DONE]",
+        ],
+    )
+    client = _Client(response)
+    settings = openai_client.get_settings()
+    monkeypatch.setattr(settings, "openai_api_key", "test-key")
+    monkeypatch.setattr(settings, "openai_base_url", "https://api.deepseek.com")
+    monkeypatch.setattr(settings, "default_model", "deepseek-v4-pro")
+    monkeypatch.setattr(settings, "deepseek_thinking_enabled", True)
+    monkeypatch.setattr(settings, "chat_stream_include_usage", False)
+    monkeypatch.setattr(openai_client, "_get_chat_client", lambda: client)
+    monkeypatch.setattr(openai_client, "record_ai_usage", lambda **_kwargs: None)
+
+    assert "".join(openai_client.chat_stream([{"role": "user", "content": "question"}])) == "answer"
+    assert client.last_payload["thinking"] == {"type": "enabled"}
+
+
+def test_chat_stream_surfaces_reasoning_and_provider_keepalive_as_heartbeats(monkeypatch):
+    response = _Response(
+        {},
+        lines=[
+            ": keep-alive",
+            'data: {"choices":[{"delta":{"reasoning_content":"thinking"}}]}',
+            'data: {"choices":[{"delta":{"content":"answer"}}]}',
+            "data: [DONE]",
+        ],
+    )
+    client = _Client(response)
+    settings = openai_client.get_settings()
+    monkeypatch.setattr(settings, "openai_api_key", "test-key")
+    monkeypatch.setattr(settings, "openai_base_url", "https://api.deepseek.com")
+    monkeypatch.setattr(settings, "default_model", "deepseek-v4-flash")
+    monkeypatch.setattr(settings, "chat_stream_include_usage", False)
+    monkeypatch.setattr(openai_client, "_CHAT_STREAM_HEARTBEAT_SECONDS", 0.0)
+    monkeypatch.setattr(openai_client, "_get_chat_client", lambda: client)
+    monkeypatch.setattr(openai_client, "record_ai_usage", lambda **_kwargs: None)
+
+    events = list(openai_client.chat_stream([{"role": "user", "content": "question"}]))
+
+    assert events == [None, None, "answer"]
+
+
+def test_thinking_option_does_not_pollute_non_deepseek_requests():
+    cases = [
+        ("https://api.openai.com/v1", "deepseek-v4-flash"),
+        ("https://api.deepseek.com", "gpt-4.1-mini"),
+        ("https://api.deepseek.com.evil.example/v1", "deepseek-v4-flash"),
+    ]
+    for base_url, model in cases:
+        assert (
+            openai_client._deepseek_thinking_option(
+                base_url=base_url,
+                model=model,
+                enabled=False,
+            )
+            is None
+        )

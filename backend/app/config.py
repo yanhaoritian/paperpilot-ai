@@ -40,6 +40,10 @@ class Settings(BaseSettings):
     # Ask OpenAI-compatible streaming endpoints to include a final usage
     # object. Unsupported providers are retried once without this option.
     chat_stream_include_usage: bool = True
+    # DeepSeek V4 enables high-effort thinking by default. PaperPilot keeps
+    # latency-sensitive JSON/stream calls in non-thinking mode unless
+    # DEEPSEEK_THINKING_ENABLED=1 is explicitly configured.
+    deepseek_thinking_enabled: bool = False
     ai_usage_tracking_enabled: bool = True
     # JSON list of effective model prices. Values such as input_per_million
     # are ordinary currency units; startup converts them to integer micro-units.

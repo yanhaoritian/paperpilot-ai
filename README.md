@@ -126,6 +126,27 @@ docker compose up --build -d
 `127.0.0.1`，如确需对其他主机开放，请显式设置 `API_BIND_HOST` / `DB_BIND_HOST` 并配合防火墙。
 公网部署时请设置 `CORS_ORIGINS` 为你的域名，并保持 `AUTH_EXPOSE_CODE=0`。
 
+问答接口使用 SSE 流式返回。Nginx 反代至少应为 `/api/` 关闭响应缓冲，并把相邻两次
+上游读取之间的超时提高到 300 秒，避免模型生成期间被默认的 60 秒超时截断：
+
+```nginx
+location /api/ {
+    proxy_pass http://127.0.0.1:8787;
+    proxy_http_version 1.1;
+    proxy_set_header Host $host;
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto $scheme;
+    proxy_buffering off;
+    proxy_cache off;
+    proxy_read_timeout 300s;
+    proxy_send_timeout 300s;
+}
+```
+
+DeepSeek V4 默认开启高强度思考；网站默认通过 `DEEPSEEK_THINKING_ENABLED=0` 使用低延迟
+非思考模式。只有在确实需要长推理、且反代超时已经正确配置时才建议将其设为 `1`。
+
 生产升级前先备份数据库与 PDF，再显式执行迁移：
 
 ```bash

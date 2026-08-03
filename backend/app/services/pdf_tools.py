@@ -623,6 +623,9 @@ def iter_agent_events(
             temperature=temperature,
             operation="answer_generate",
         ):
+            if tok is None:
+                yield ("heartbeat", {"phase": "model"})
+                continue
             parts.append(tok)
             yield ("token", {"text": tok})
         answer = "".join(parts).strip()
@@ -777,6 +780,9 @@ def iter_agent_events(
         temperature=temperature,
         operation="answer_generate",
     ):
+        if tok is None:
+            yield ("heartbeat", {"phase": "model"})
+            continue
         parts.append(tok)
         yield ("token", {"text": tok})
     answer = "".join(parts).strip() or "无法从文献中得出可靠结论。"

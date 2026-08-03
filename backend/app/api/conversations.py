@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import json
+import logging
 from collections.abc import Iterator
+from contextlib import contextmanager
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, status
@@ -48,6 +50,7 @@ from app.services.research_skills import (
 from app.services.usage_tracking import record_cache_hit, usage_scope
 
 router = APIRouter(prefix="/api/conversations", tags=["conversations"])
+logger = logging.getLogger(__name__)
 
 
 def _conv_or_404(
@@ -226,6 +229,34 @@ def _sse(event: str, data: dict) -> str:
     return f"event: {event}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
 
 
+@contextmanager
+def _closing_event_iterator(events: Iterator):
+    """Always close the nested agent iterator when the SSE consumer goes away."""
+
+    iterator = iter(events)
+    disconnecting = False
+    try:
+        yield iterator
+    except GeneratorExit:
+        # Never turn a client disconnect into a business error. In particular,
+        # the caller must not attempt another SSE yield while close() unwinds.
+        disconnecting = True
+        raise
+    finally:
+        close = getattr(iterator, "close", None)
+        if callable(close):
+            try:
+                close()
+            except Exception:  # noqa: BLE001
+                if not disconnecting:
+                    raise
+                # A broken nested generator must not replace GeneratorExit and
+                # provoke "generator ignored GeneratorExit" in StreamingResponse.
+                logger.exception(
+                    "agent event iterator close failed during client disconnect"
+                )
+
+
 @router.post("/{conversation_id}/messages")
 def post_message_stream(
     conversation_id: str,
@@ -398,6 +429,7 @@ def post_message_stream(
     force_document_coverage = bool(skill.cover_all_documents)
 
     def event_gen() -> Iterator[str]:
+        stream_ok = True
         yield _sse(
             "meta",
             {
@@ -454,37 +486,56 @@ def post_message_stream(
         else:
             work = SessionLocal()
             try:
-                with usage_scope(
-                    request_id=request_id,
-                    user_id=owner_id,
+                agent_events = iter_agent_events(
+                    work,
+                    owner_id=owner_id,
                     conversation_id=conv_id,
-                    message_id=assistant_id,
-                    skill_id=skill_id,
-                    skill_version=skill_version,
-                ):
-                    for event, data in iter_agent_events(
-                        work,
-                        owner_id=owner_id,
-                        conversation_id=conv_id,
-                        library_ids=library_ids,
-                        question=question,
-                        history=history,
-                        model=model,
-                        temperature=temperature,
-                        skill_prompt=skill_prompt,
-                        force_document_coverage=force_document_coverage,
-                    ):
+                    library_ids=library_ids,
+                    question=question,
+                    history=history,
+                    model=model,
+                    temperature=temperature,
+                    skill_prompt=skill_prompt,
+                    force_document_coverage=force_document_coverage,
+                )
+                with _closing_event_iterator(agent_events) as managed_events:
+                    while True:
+                        try:
+                            # A sync StreamingResponse may resume this generator
+                            # in a different context. Keep ContextVar tokens within
+                            # one next() call instead of spanning the outer yield.
+                            with usage_scope(
+                                request_id=request_id,
+                                user_id=owner_id,
+                                conversation_id=conv_id,
+                                message_id=assistant_id,
+                                skill_id=skill_id,
+                                skill_version=skill_version,
+                            ):
+                                event, data = next(managed_events)
+                        except StopIteration:
+                            break
+
                         if event == "token":
                             text = str(data.get("text") or "")
                             parts.append(text)
                             yield _sse("token", {"text": text})
                         elif event == "final":
                             final_payload = data
-                        elif event in {"status", "tool", "meta", "error"}:
+                        elif event == "error":
+                            stream_ok = False
+                            yield _sse(event, data)
+                        elif event in {"status", "tool", "meta"}:
                             yield _sse(event, data)
                         else:
                             yield _sse(event, data)
             except Exception as exc:  # noqa: BLE001
+                stream_ok = False
+                logger.exception(
+                    "conversation agent stream failed conversation_id=%s message_id=%s",
+                    conv_id,
+                    assistant_id,
+                )
                 err = f"生成失败：{exc}"
                 if not parts:
                     parts.append(err)
@@ -574,7 +625,7 @@ def post_message_stream(
                 s.commit()
         finally:
             s.close()
-        yield _sse("done", {"ok": True})
+        yield _sse("done", {"ok": stream_ok})
 
     return StreamingResponse(
         event_gen(),
