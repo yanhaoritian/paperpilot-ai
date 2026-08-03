@@ -5,13 +5,21 @@ from uuid import uuid4
 
 from fastapi import APIRouter, BackgroundTasks, Depends, File, HTTPException, UploadFile, status
 from fastapi.responses import FileResponse
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.config import get_settings
 from app.db import get_db
 from app.deps import get_current_user
-from app.models import Chunk, Document, DocumentStatus, Library, User
+from app.models import (
+    Chunk,
+    Document,
+    DocumentStatus,
+    IndexJob,
+    IndexJobStatus,
+    Library,
+    User,
+)
 from app.schemas import DocumentOut
 from app.services.document_storage import (
     portable_document_path,
@@ -36,11 +44,74 @@ def _library_or_404(db: Session, library_id: str, owner_id: str) -> Library:
     return lib
 
 
-def _doc_or_404(db: Session, document_id: str, owner_id: str) -> Document:
-    doc = db.scalar(select(Document).where(Document.id == document_id, Document.owner_id == owner_id))
+def _doc_or_404(
+    db: Session,
+    document_id: str,
+    owner_id: str,
+    *,
+    lock: bool = False,
+) -> Document:
+    statement = select(Document).where(
+        Document.id == document_id,
+        Document.owner_id == owner_id,
+    )
+    if lock:
+        statement = statement.with_for_update()
+    doc = db.scalar(statement)
     if not doc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="文档不存在")
     return doc
+
+
+def _active_index_job(db: Session, document_id: str) -> IndexJob | None:
+    statement = (
+        select(IndexJob)
+        .where(
+            IndexJob.document_id == document_id,
+            IndexJob.status.in_(
+                [IndexJobStatus.pending.value, IndexJobStatus.running.value]
+            ),
+        )
+        .order_by(IndexJob.created_at.desc())
+    )
+    if not settings.is_sqlite:
+        statement = statement.with_for_update()
+    return db.scalar(statement)
+
+
+def _indexed_chunk_count(db: Session, document_id: str) -> int:
+    return int(
+        db.scalar(
+            select(func.count())
+            .select_from(Chunk)
+            .where(Chunk.document_id == document_id)
+        )
+        or 0
+    )
+
+
+def _ensure_existing_document_index(db: Session, doc: Document) -> str:
+    """Return ready/active/queued while repairing a duplicate-upload shell."""
+    if (
+        doc.status == DocumentStatus.ready.value
+        and int(doc.page_count or 0) > 0
+        and _indexed_chunk_count(db, str(doc.id)) > 0
+    ):
+        return "ready"
+
+    if _active_index_job(db, str(doc.id)) is not None:
+        return "active"
+
+    doc.status = DocumentStatus.pending.value
+    doc.status_detail = "queued_upload_repair"
+    doc.index_attempts = 0
+    enqueue_index_job(
+        db,
+        document_id=doc.id,
+        owner_id=doc.owner_id,
+        commit=False,
+    )
+    return "queued"
 
 
 @router.post(
@@ -56,6 +127,11 @@ async def upload_document(
     db: Session = Depends(get_db),
 ) -> Document:
     _library_or_404(db, library_id, user.id)
+    if settings.index_external_worker and not settings.index_job_enabled:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="索引队列未启用，暂时无法上传文档",
+        )
     if not file.filename or not file.filename.lower().endswith(".pdf"):
         raise HTTPException(status_code=400, detail="仅支持 PDF 文件")
 
@@ -86,13 +162,35 @@ async def upload_document(
             raise HTTPException(status_code=400, detail="文件内容不是有效的 PDF")
 
         file_hash = digest.hexdigest()
-        existing = db.scalar(
-            select(Document).where(
-                Document.library_id == library_id,
-                Document.file_hash == file_hash,
-            )
+        existing_statement = select(Document).where(
+            Document.library_id == library_id,
+            Document.file_hash == file_hash,
         )
+        if not settings.is_sqlite:
+            existing_statement = existing_statement.with_for_update()
+        existing = db.scalar(existing_statement)
         if existing:
+            restored_file = False
+            existing_path = resolve_document_path(existing)
+            if not existing_path.is_file():
+                relative_path = portable_document_path(
+                    owner_id=user.id,
+                    library_id=library_id,
+                    document_id=str(existing.id),
+                )
+                existing_path = storage_root() / relative_path
+                existing_path.parent.mkdir(parents=True, exist_ok=True)
+                temp_path.replace(existing_path)
+                existing.file_path = relative_path.as_posix()
+                restored_file = True
+
+            index_state = _ensure_existing_document_index(db, existing)
+            if restored_file or index_state == "queued":
+                db.commit()
+                db.refresh(existing)
+                query_cache().invalidate_owner(user.id)
+            if index_state != "ready" and not settings.index_external_worker:
+                schedule_index(existing.id, background_tasks)
             return existing
 
         consume_upload_quota(db, user.id)
@@ -104,6 +202,7 @@ async def upload_document(
             file_path="",  # filled below
             file_hash=file_hash,
             status=DocumentStatus.pending.value,
+            status_detail="queued_upload",
         )
         db.add(doc)
         dest: Path | None = None
@@ -210,7 +309,13 @@ def reindex_document(
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> Document:
-    doc = _doc_or_404(db, document_id, user.id)
+    doc = _doc_or_404(db, document_id, user.id, lock=True)
+    active_job = _active_index_job(db, document_id)
+    if active_job is not None:
+        if not settings.index_external_worker:
+            schedule_index(doc.id, background_tasks)
+        return doc
+
     doc.status = DocumentStatus.pending.value
     doc.status_detail = "queued_reindex"
     doc.index_attempts = 0

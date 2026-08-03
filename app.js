@@ -31,6 +31,7 @@ const chatDockDocLabel = document.getElementById("chatDockDocLabel");
 const chatEmpty = document.getElementById("chatEmpty");
 const conversationSelect = document.getElementById("conversationSelect");
 const newConversationBtn = document.getElementById("newConversationBtn");
+const deleteConversationBtn = document.getElementById("deleteConversationBtn");
 const memoryToggleBtn = document.getElementById("memoryToggleBtn");
 const healthLibraryState = document.getElementById("healthLibraryState");
 const healthModelName = document.getElementById("healthModelName");
@@ -62,6 +63,7 @@ let activeLibraryId = "";
 /** @type {Set<string>} */
 let selectedQueryLibraryIds = new Set();
 let pollTimer = null;
+let documentRefreshSequence = 0;
 /** @type {Array<any>} */
 let conversations = [];
 let activeConversationId = "";
@@ -555,9 +557,15 @@ function renderStoredMessages(messages, truncated = false) {
 }
 
 function updateMemoryControl(detail = null) {
-  if (!memoryToggleBtn) return;
   const current =
     detail || conversations.find((item) => item.id === activeConversationId);
+  if (deleteConversationBtn) {
+    deleteConversationBtn.disabled = streaming || !current;
+    deleteConversationBtn.title = current
+      ? `删除会话「${current.title || "未命名"}」`
+      : "请先选择会话";
+  }
+  if (!memoryToggleBtn) return;
   if (!current) {
     memoryToggleBtn.disabled = true;
     memoryToggleBtn.textContent = "长记忆：—";
@@ -744,28 +752,67 @@ async function refreshLibraries() {
   await refreshDocuments();
 }
 
+function documentIndexDisplay(document) {
+  const state = String(document.status || "pending");
+  if (state === "pending") {
+    return {
+      text: document.status_detail === "queued_reindex" ? "等待重新索引" : "等待索引",
+      action: "排队中",
+      canReindex: false
+    };
+  }
+  if (state === "processing") {
+    return { text: "正在解析并建立索引", action: "索引中", canReindex: false };
+  }
+  if (state === "failed") {
+    const detail = document.status_detail
+      ? ` · ${String(document.status_detail).slice(0, 80)}`
+      : "";
+    return { text: `索引失败${detail}`, action: "重索引", canReindex: true };
+  }
+  if (state === "ready" && Number(document.page_count || 0) > 0) {
+    return {
+      text: `可检索 · ${Number(document.page_count)} 页`,
+      action: "重索引",
+      canReindex: true
+    };
+  }
+  if (state === "ready") {
+    return { text: "索引异常 · 未生成可检索内容", action: "重索引", canReindex: true };
+  }
+  return { text: state, action: "重索引", canReindex: true };
+}
+
 async function refreshDocuments() {
   if (!documentList) return;
-  if (!activeLibraryId) {
+  const refreshSequence = ++documentRefreshSequence;
+  const libraryId = activeLibraryId;
+  if (!libraryId) {
+    if (pollTimer) {
+      clearInterval(pollTimer);
+      pollTimer = null;
+    }
     if (documentCount) documentCount.textContent = "0";
     documentList.innerHTML = "<li class='muted'>请先选择知识库。</li>";
     return;
   }
-  const docs = await api(`/api/libraries/${activeLibraryId}/documents`);
+  const docs = await api(`/api/libraries/${libraryId}/documents`);
+  if (refreshSequence !== documentRefreshSequence || libraryId !== activeLibraryId) return;
   if (documentCount) documentCount.textContent = String(docs.length);
   documentList.innerHTML = "";
   if (!docs.length) {
     documentList.innerHTML = "<li class='muted'>当前库暂无文档。</li>";
   }
   for (const d of docs) {
+    const indexDisplay = documentIndexDisplay(d);
     const li = document.createElement("li");
-    li.className = "doc-item";
+    li.className = `doc-item is-${escapeHtml(String(d.status || "pending"))}`;
     li.innerHTML = `<div class="doc-row">
       <div class="doc-meta">
         <strong>${escapeHtml(d.file_name)}</strong>
-        <span>${escapeHtml(d.status)}${d.status_detail ? " · " + escapeHtml(String(d.status_detail).slice(0, 80)) : ""} · ${d.page_count || 0} 页</span>
+        <span>${escapeHtml(indexDisplay.text)}</span>
       </div>
-      <button type="button" class="btn btn-ghost btn-sm" data-reindex="${escapeHtml(d.id)}">重索引</button>
+      <button type="button" class="btn btn-ghost btn-sm" data-reindex="${escapeHtml(d.id)}" ${indexDisplay.canReindex ? "" : "disabled"}>${escapeHtml(indexDisplay.action)}</button>
       <button type="button" class="btn btn-ghost btn-sm btn-danger" data-del="${escapeHtml(d.id)}">删</button>
     </div>`;
     documentList.appendChild(li);
@@ -801,7 +848,6 @@ async function refreshDocuments() {
   if (pending && !pollTimer) {
     pollTimer = setInterval(() => {
       refreshDocuments().catch(() => {});
-      refreshLibraries().catch(() => {});
     }, 2500);
   }
   if (!pending && pollTimer) {
@@ -920,7 +966,7 @@ function showSelectedFile(file) {
     fileSelected.textContent = `${file.name}（${formatBytes(file.size)}）`;
   }
   if (docStatusLine) {
-    docStatusLine.textContent = `已选：${file.name}。请点击「上传并索引」写入当前知识库。`;
+    docStatusLine.textContent = `已选：${file.name}。请点击「添加并索引」写入当前知识库。`;
   }
   setStatus(`已选择 ${file.name}，可上传。`);
 }
@@ -978,14 +1024,20 @@ uploadBtn?.addEventListener("click", async () => {
   if (docStatusLine) docStatusLine.textContent = `正在上传「${file.name}」…`;
   try {
     const doc = await api(`/api/libraries/${activeLibraryId}/documents`, { method: "POST", body: fd });
-    setStatus(`已入库：${doc.file_name}（${doc.status}）`);
-    if (docStatusLine) {
-      docStatusLine.textContent = `已入库：${doc.file_name} · ${doc.status}。可继续选择下一篇上传。`;
-    }
+    const isReady = doc.status === "ready" && Number(doc.page_count || 0) > 0;
+    setStatus(
+      isReady
+        ? `文档已存在且可检索：${doc.file_name}`
+        : `已上传：${doc.file_name}，索引任务已排队。`
+    );
     if (pdfFile) pdfFile.value = "";
     showSelectedFile(null);
+    if (docStatusLine) docStatusLine.textContent = isReady
+      ? `「${doc.file_name}」已在当前知识库中，可直接检索。`
+      : `「${doc.file_name}」正在后台建立索引；完成后论文库会自动更新，无需点击重索引。`;
     await refreshLibraries();
   } catch (e) {
+    if (docStatusLine) docStatusLine.textContent = `上传失败：${e.message}`;
     setStatus(e.message, true);
   }
 });
@@ -1163,6 +1215,39 @@ newConversationBtn?.addEventListener("click", async () => {
     await refreshConversations();
     setStatus("已新建对话。");
   } catch (e) {
+    setStatus(e.message, true);
+  }
+});
+
+deleteConversationBtn?.addEventListener("click", async () => {
+  if (!activeConversationId || streaming) return;
+  const conversationId = activeConversationId;
+  const currentIndex = conversations.findIndex((item) => item.id === conversationId);
+  const current = conversations[currentIndex];
+  const title = current?.title || "未命名";
+  const approved = window.confirm(
+    `确认删除会话“${title}”？该会话的聊天消息和长记忆将永久删除，无法撤销；Token 与费用统计会继续保留。`
+  );
+  if (!approved) return;
+
+  deleteConversationBtn.disabled = true;
+  try {
+    await api(`/api/conversations/${conversationId}`, { method: "DELETE" });
+    activeConversationId = "";
+    activeConversationMemoryEnabled = true;
+    clearChatDom();
+    await refreshConversations();
+    const fallbackIndex = Math.max(0, currentIndex);
+    const fallback = conversations[Math.min(fallbackIndex, conversations.length - 1)];
+    if (fallback) {
+      await loadConversation(fallback.id);
+    } else {
+      renderConversationSelect();
+      updateMemoryControl();
+    }
+    setStatus(`会话“${title}”已删除。`);
+  } catch (e) {
+    await refreshConversations().catch(() => {});
     setStatus(e.message, true);
   }
 });

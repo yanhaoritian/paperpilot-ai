@@ -216,7 +216,7 @@ def delete_conversation(
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ) -> Response:
-    conv = _conv_or_404(db, conversation_id, user.id)
+    conv = _conv_or_404(db, conversation_id, user.id, lock=True)
     db.delete(conv)
     db.commit()
     return Response(status_code=status.HTTP_204_NO_CONTENT)

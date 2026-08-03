@@ -41,6 +41,27 @@ def client(tmp_path, monkeypatch):
     get_settings.cache_clear()
 
 
+def _register_headers(client: TestClient, tag: str) -> tuple[dict[str, str], str]:
+    email = f"{tag}_{uuid.uuid4().hex[:8]}@example.com"
+    code = client.post(
+        "/api/auth/send-code",
+        json={"channel": "email", "target": email},
+    ).json()["dev_code"]
+    token = client.post(
+        "/api/auth/register",
+        json={
+            "username": f"{tag}_{uuid.uuid4().hex[:6]}",
+            "password": "secret12",
+            "code": code,
+            "channel": "email",
+            "email": email,
+        },
+    ).json()["access_token"]
+    headers = {"Authorization": f"Bearer {token}"}
+    user_id = client.get("/api/auth/me", headers=headers).json()["id"]
+    return headers, user_id
+
+
 def test_register_with_email_code_and_login(client: TestClient):
     email = f"u_{uuid.uuid4().hex[:8]}@example.com"
     code_resp = client.post("/api/auth/send-code", json={"channel": "email", "target": email})
@@ -207,6 +228,108 @@ def test_conversation_crud(client: TestClient):
     )
     assert cleared.status_code == 204
     assert client.delete(f"/api/conversations/{cid}", headers=headers).status_code == 204
+    assert client.get(f"/api/conversations/{cid}", headers=headers).status_code == 404
+    assert all(
+        row["id"] != cid
+        for row in client.get("/api/conversations", headers=headers).json()
+    )
+
+
+def test_delete_conversation_cascades_messages_and_memories(client: TestClient):
+    headers, user_id = _register_headers(client, "conv_delete")
+    library = client.post(
+        "/api/libraries",
+        headers=headers,
+        json={"name": "待删除会话库"},
+    ).json()
+    conversation = client.post(
+        "/api/conversations",
+        headers=headers,
+        json={"title": "待删除会话", "library_ids": [library["id"]]},
+    ).json()
+
+    from sqlalchemy import func, select
+
+    from app.db import SessionLocal
+    from app.models import Conversation, ConversationMemory, Message
+
+    db = SessionLocal()
+    try:
+        row = db.get(Conversation, conversation["id"])
+        row.memory_summary = "派生摘要"
+        row.summarized_message_count = 1
+        db.add(
+            Message(
+                conversation_id=conversation["id"],
+                sequence=1,
+                role="user",
+                content="需要删除的消息",
+            )
+        )
+        db.add(
+            ConversationMemory(
+                owner_id=user_id,
+                conversation_id=conversation["id"],
+                content="需要删除的情景记忆",
+                source_start_index=1,
+                source_end_index=1,
+            )
+        )
+        db.commit()
+    finally:
+        db.close()
+
+    deleted = client.delete(
+        f"/api/conversations/{conversation['id']}",
+        headers=headers,
+    )
+    assert deleted.status_code == 204, deleted.text
+    assert client.get(
+        f"/api/conversations/{conversation['id']}",
+        headers=headers,
+    ).status_code == 404
+
+    db = SessionLocal()
+    try:
+        assert db.get(Conversation, conversation["id"]) is None
+        assert int(
+            db.scalar(
+                select(func.count())
+                .select_from(Message)
+                .where(Message.conversation_id == conversation["id"])
+            )
+            or 0
+        ) == 0
+        assert int(
+            db.scalar(
+                select(func.count())
+                .select_from(ConversationMemory)
+                .where(ConversationMemory.conversation_id == conversation["id"])
+            )
+            or 0
+        ) == 0
+    finally:
+        db.close()
+
+
+def test_delete_conversation_is_owner_scoped(client: TestClient):
+    headers_a, _ = _register_headers(client, "conv_owner_a")
+    headers_b, _ = _register_headers(client, "conv_owner_b")
+    conversation = client.post(
+        "/api/conversations",
+        headers=headers_a,
+        json={"title": "A 的会话"},
+    ).json()
+
+    denied = client.delete(
+        f"/api/conversations/{conversation['id']}",
+        headers=headers_b,
+    )
+    assert denied.status_code == 404
+    assert client.get(
+        f"/api/conversations/{conversation['id']}",
+        headers=headers_a,
+    ).status_code == 200
 
 
 def test_upload_rejects_fake_pdf(client: TestClient):
@@ -350,6 +473,321 @@ def test_external_worker_mode_only_enqueues_upload(client: TestClient, monkeypat
             f"{document.owner_id}/{document.library_id}/{document.id}.pdf"
         )
         assert resolve_document_path(document).is_file()
+    finally:
+        db.close()
+
+
+def test_duplicate_pending_upload_repairs_missing_index_job(
+    client: TestClient,
+    monkeypatch,
+):
+    headers, _ = _register_headers(client, "queue_repair")
+    library = client.post(
+        "/api/libraries",
+        headers=headers,
+        json={"name": "空壳修复库"},
+    ).json()
+    payload = b"%PDF-1.4\nrepair-shell\n%%EOF"
+
+    from app.api import documents as documents_api
+
+    monkeypatch.setattr(documents_api.settings, "index_external_worker", True)
+    first = client.post(
+        f"/api/libraries/{library['id']}/documents",
+        headers=headers,
+        files={"file": ("repair.pdf", payload, "application/pdf")},
+    )
+    assert first.status_code == 201, first.text
+
+    from sqlalchemy import func, select
+
+    from app.db import SessionLocal
+    from app.models import Document, IndexJob
+
+    db = SessionLocal()
+    try:
+        db.query(IndexJob).filter(
+            IndexJob.document_id == first.json()["id"]
+        ).delete(synchronize_session=False)
+        document = db.get(Document, first.json()["id"])
+        document.status = "pending"
+        document.status_detail = "orphaned_without_job"
+        document.index_attempts = 2
+        db.commit()
+    finally:
+        db.close()
+
+    repeated = client.post(
+        f"/api/libraries/{library['id']}/documents",
+        headers=headers,
+        files={"file": ("repair.pdf", payload, "application/pdf")},
+    )
+    assert repeated.status_code == 201, repeated.text
+    assert repeated.json()["id"] == first.json()["id"]
+    assert repeated.json()["status"] == "pending"
+    assert repeated.json()["status_detail"] == "queued_upload_repair"
+
+    db = SessionLocal()
+    try:
+        document = db.get(Document, first.json()["id"])
+        assert document.index_attempts == 0
+        assert int(
+            db.scalar(
+                select(func.count())
+                .select_from(IndexJob)
+                .where(
+                    IndexJob.document_id == first.json()["id"],
+                    IndexJob.status == "pending",
+                )
+            )
+            or 0
+        ) == 1
+    finally:
+        db.close()
+
+
+def test_failed_duplicate_upload_requeues_without_manual_reindex(
+    client: TestClient,
+    monkeypatch,
+):
+    headers, _ = _register_headers(client, "failed_repair")
+    library = client.post(
+        "/api/libraries",
+        headers=headers,
+        json={"name": "失败恢复库"},
+    ).json()
+    payload = b"%PDF-1.4\nfailed-shell\n%%EOF"
+
+    from app.api import documents as documents_api
+
+    monkeypatch.setattr(documents_api.settings, "index_external_worker", True)
+    first = client.post(
+        f"/api/libraries/{library['id']}/documents",
+        headers=headers,
+        files={"file": ("failed.pdf", payload, "application/pdf")},
+    )
+    assert first.status_code == 201, first.text
+
+    from sqlalchemy import func, select
+
+    from app.db import SessionLocal
+    from app.models import Document, IndexJob
+
+    db = SessionLocal()
+    try:
+        document = db.get(Document, first.json()["id"])
+        document.status = "failed"
+        document.status_detail = "temporary_provider_error"
+        document.index_attempts = 3
+        job = db.scalar(
+            select(IndexJob).where(IndexJob.document_id == document.id)
+        )
+        job.status = "failed"
+        job.last_error = "temporary_provider_error"
+        db.commit()
+    finally:
+        db.close()
+
+    repeated = client.post(
+        f"/api/libraries/{library['id']}/documents",
+        headers=headers,
+        files={"file": ("failed.pdf", payload, "application/pdf")},
+    )
+    assert repeated.status_code == 201, repeated.text
+    assert repeated.json()["id"] == first.json()["id"]
+    assert repeated.json()["status"] == "pending"
+    assert repeated.json()["status_detail"] == "queued_upload_repair"
+
+    db = SessionLocal()
+    try:
+        document = db.get(Document, first.json()["id"])
+        assert document.index_attempts == 0
+        assert int(
+            db.scalar(
+                select(func.count())
+                .select_from(IndexJob)
+                .where(
+                    IndexJob.document_id == document.id,
+                    IndexJob.status == "pending",
+                )
+            )
+            or 0
+        ) == 1
+    finally:
+        db.close()
+
+
+def test_reindex_does_not_reset_an_active_job(client: TestClient, monkeypatch):
+    headers, _ = _register_headers(client, "active_reindex")
+    library = client.post(
+        "/api/libraries",
+        headers=headers,
+        json={"name": "活动任务库"},
+    ).json()
+
+    from app.api import documents as documents_api
+
+    monkeypatch.setattr(documents_api.settings, "index_external_worker", True)
+    uploaded = client.post(
+        f"/api/libraries/{library['id']}/documents",
+        headers=headers,
+        files={
+            "file": (
+                "active.pdf",
+                b"%PDF-1.4\nactive-job\n%%EOF",
+                "application/pdf",
+            )
+        },
+    )
+    assert uploaded.status_code == 201, uploaded.text
+
+    from sqlalchemy import func, select
+
+    from app.db import SessionLocal
+    from app.models import Document, IndexJob
+
+    db = SessionLocal()
+    try:
+        document = db.get(Document, uploaded.json()["id"])
+        document.status = "processing"
+        document.status_detail = "worker_claimed"
+        document.index_attempts = 1
+        job = db.scalar(
+            select(IndexJob).where(IndexJob.document_id == document.id)
+        )
+        job.status = "running"
+        db.commit()
+    finally:
+        db.close()
+
+    response = client.post(
+        f"/api/documents/{uploaded.json()['id']}/reindex",
+        headers=headers,
+    )
+    assert response.status_code == 200, response.text
+    assert response.json()["status"] == "processing"
+    assert response.json()["status_detail"] == "worker_claimed"
+
+    db = SessionLocal()
+    try:
+        document = db.get(Document, uploaded.json()["id"])
+        assert document.index_attempts == 1
+        assert int(
+            db.scalar(
+                select(func.count())
+                .select_from(IndexJob)
+                .where(IndexJob.document_id == document.id)
+            )
+            or 0
+        ) == 1
+    finally:
+        db.close()
+
+
+def test_upload_pipeline_reaches_ready_without_manual_reindex(
+    client: TestClient,
+    monkeypatch,
+):
+    headers, _ = _register_headers(client, "pipeline")
+    library = client.post(
+        "/api/libraries",
+        headers=headers,
+        json={"name": "首次索引闭环库"},
+    ).json()
+    fixture = (
+        Path(__file__).resolve().parents[1]
+        / "evals"
+        / "fixtures"
+        / "alpha_kinase.pdf"
+    )
+    payload = fixture.read_bytes()
+
+    from app.api import documents as documents_api
+
+    monkeypatch.setattr(documents_api.settings, "index_external_worker", True)
+    monkeypatch.setattr(documents_api.settings, "contextual_chunk_enabled", False)
+    uploaded = client.post(
+        f"/api/libraries/{library['id']}/documents",
+        headers=headers,
+        files={"file": ("alpha_kinase.pdf", payload, "application/pdf")},
+    )
+    assert uploaded.status_code == 201, uploaded.text
+    assert uploaded.json()["status"] == "pending"
+
+    from sqlalchemy import func, select
+
+    from app.db import SessionLocal
+    from app.models import Block, Chunk, IndexJob
+    from app.services.indexing import index_document_with_retries
+
+    db = SessionLocal()
+    try:
+        index_document_with_retries(db, uploaded.json()["id"])
+    finally:
+        db.close()
+
+    ready = client.get(
+        f"/api/documents/{uploaded.json()['id']}",
+        headers=headers,
+    )
+    assert ready.status_code == 200, ready.text
+    assert ready.json()["status"] == "ready"
+    assert ready.json()["page_count"] > 0
+
+    db = SessionLocal()
+    try:
+        assert int(
+            db.scalar(
+                select(func.count())
+                .select_from(Chunk)
+                .where(Chunk.document_id == uploaded.json()["id"])
+            )
+            or 0
+        ) > 0
+        assert int(
+            db.scalar(
+                select(func.count())
+                .select_from(Block)
+                .where(Block.document_id == uploaded.json()["id"])
+            )
+            or 0
+        ) > 0
+        jobs_before = int(
+            db.scalar(
+                select(func.count())
+                .select_from(IndexJob)
+                .where(IndexJob.document_id == uploaded.json()["id"])
+            )
+            or 0
+        )
+        latest_job = db.scalar(
+            select(IndexJob)
+            .where(IndexJob.document_id == uploaded.json()["id"])
+            .order_by(IndexJob.created_at.desc())
+        )
+        assert latest_job.status == "done"
+    finally:
+        db.close()
+
+    repeated = client.post(
+        f"/api/libraries/{library['id']}/documents",
+        headers=headers,
+        files={"file": ("alpha_kinase.pdf", payload, "application/pdf")},
+    )
+    assert repeated.status_code == 201, repeated.text
+    assert repeated.json()["id"] == uploaded.json()["id"]
+    assert repeated.json()["status"] == "ready"
+
+    db = SessionLocal()
+    try:
+        assert int(
+            db.scalar(
+                select(func.count())
+                .select_from(IndexJob)
+                .where(IndexJob.document_id == uploaded.json()["id"])
+            )
+            or 0
+        ) == jobs_before
     finally:
         db.close()
 
